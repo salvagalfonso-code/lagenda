@@ -1,91 +1,110 @@
-
-workflows:
-  lagenda-ios-simulator:
-    name: L'Agenda - iPhone virtual
-    instance_type: mac_mini_m2
-    max_build_duration: 120
-    environment:
-      xcode: latest
-      cocoapods: default
-    scripts:
-      - name: Preparar projecte
-        script: |
-          set -eu
-          if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
-          PODFILE=$(find . -name Podfile -not -path '*/Pods/*' -not -path '*/node_modules/*' -print -quit)
-          if [ -n "$PODFILE" ]; then
-            (cd "$(dirname "$PODFILE")" && pod install)
-          fi
-
-      - name: Compilar per a simulador iPhone
-        script: |
-          set -eu
-
-          # Preferim iosApp, pero tambe busquem altres projectes Xcode.
-          if [ -d iosApp/iosApp.xcworkspace ]; then
-            KIND=-workspace
-            TARGET=iosApp/iosApp.xcworkspace
-          elif [ -d iosApp/iosApp.xcodeproj ]; then
-            KIND=-project
-            TARGET=iosApp/iosApp.xcodeproj
-          else
-            TARGET=$(find . -type d -name '*.xcworkspace' \
-              -not -path '*/Pods/*' -not -path '*/node_modules/*' \
-              -not -path '*.xcodeproj/*' -print -quit)
-            KIND=-workspace
-            if [ -z "$TARGET" ]; then
-              TARGET=$(find . -type d -name '*.xcodeproj' \
-                -not -path '*/Pods/*' -not -path '*/node_modules/*' \
-                -print -quit)
-              KIND=-project
             fi
-          fi
+          done
 
-          if [ -z "$TARGET" ]; then
-            echo 'ERROR: No hi ha cap projecte .xcodeproj ni .xcworkspace.'
-            echo 'Cal pujar el projecte iOS; un projecte nomes Android no es pot compilar per a iPhone.'
-            exit 1
-          fi
+      - name: Detectar projecte real i compilar per a iPhone
+        script: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import sys
 
-          echo "Projecte trobat: $TARGET"
-          SCHEME=$(xcodebuild -list -json "$KIND" "$TARGET" | python3 -c '
-          import json, sys
-          data = json.load(sys.stdin)
-          schemes = (data.get("project") or data.get("workspace") or {}).get("schemes", [])
-          preferred = next((s for s in schemes if s.lower() in ("iosapp", "lagenda", "l agenda", "agenda")), None)
-          if preferred:
-              print(preferred)
-          elif len(schemes) == 1:
-              print(schemes[0])
-          else:
-              sys.stderr.write("ERROR: No es pot triar esquema automaticament: " + ", ".join(schemes) + "\n")
+          root = pathlib.Path.cwd()
+          excluded = {'.git', 'Pods', 'node_modules', '.gradle', 'build', 'DerivedData', '.build'}
+          projects, workspaces = [], []
+          for folder, subdirs, _ in os.walk(root):
+              for directory in list(subdirs):
+                  item = pathlib.Path(folder) / directory
+                  if directory in excluded:
+                      subdirs.remove(directory)
+                  elif directory.endswith('.xcodeproj'):
+                      if (item / 'project.pbxproj').is_file():
+                          projects.append(item)
+                      subdirs.remove(directory)
+                  elif directory.endswith('.xcworkspace'):
+                      workspaces.append(item)
+                      subdirs.remove(directory)
+
+          def rank(path):
+              name = str(path.relative_to(root)).lower()
+              return (0 if name.startswith('iosapp/') or name.startswith('ios/') else 1,
+                      0 if 'lagenda' in name or 'runner' in name or 'iosapp' in name else 1,
+                      len(name))
+
+          def inspect(kind, path):
+              command = ['xcodebuild', '-list', '-json', kind, str(path)]
+              result = subprocess.run(command, capture_output=True, text=True)
+              if result.returncode != 0:
+                  print('No es pot llegir', path, ':', result.stderr[-1200:], flush=True)
+                  return [], []
+              try:
+                  data = json.loads(result.stdout)
+                  info = data.get('project') or data.get('workspace') or {}
+                  return info.get('schemes', []) or [], info.get('targets', []) or []
+              except json.JSONDecodeError:
+                  print('Resposta de Xcode no valida per a', path, flush=True)
+                  return [], []
+
+          preferred = ('iosapp', 'lagenda', "l'agenda", 'agenda', 'runner', 'app')
+          choices = []
+          for proj in sorted(projects, key=rank):
+              schemes, targets = inspect('-project', proj)
+              print(f'PROJECTE {proj.relative_to(root)}: schemes={schemes}; targets={targets}', flush=True)
+              for scheme in schemes:
+                  choices.append((rank(proj), '-project', proj, '-scheme', scheme))
+              if not schemes and len(targets) == 1:
+                  choices.append((rank(proj), '-project', proj, '-target', targets[0]))
+
+          for ws in sorted(workspaces, key=rank):
+              schemes, _ = inspect('-workspace', ws)
+              print(f'WORKSPACE {ws.relative_to(root)}: schemes={schemes}', flush=True)
+              for scheme in schemes:
+                  # Preferim el projecte si el workspace es orfe o no te un esquema real.
+                  matched = any(p.parent == ws.parent and p.stem == ws.stem for p in projects)
+                  if matched:
+                      choices.append(((0,) + rank(ws), '-workspace', ws, '-scheme', scheme))
+
+          if not choices:
+              print('\nERROR: No hi ha cap projecte Xcode compilable amb schemes o targets.', flush=True)
+              print('El fitxer project.xcworkspace per si sol NO demostra que existisca una app iOS.', flush=True)
+              print('Cal un .xcodeproj amb project.pbxproj i un target d\'aplicacio iPhone.', flush=True)
               sys.exit(1)
-          ')
 
-          echo "Esquema: $SCHEME"
-          xcodebuild build \
-            "$KIND" "$TARGET" \
-            -scheme "$SCHEME" \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
+          def choice_rank(entry):
+              _, kind, path, selector, name = entry
+              preferred_name = name.lower().replace(' ', '')
+              score = preferred.index(preferred_name) if preferred_name in preferred else len(preferred)
+              return (0 if selector == '-scheme' else 1, score, rank(path))
 
-      - name: Crear ZIP per a Appetize
+          _, kind, path, selector, name = sorted(choices, key=choice_rank)[0]
+          print(f'COMPILANT: {path.relative_to(root)} / {selector} {name}', flush=True)
+          out = root / 'ios-build'
+          out.mkdir(exist_ok=True)
+          command = ['xcodebuild', 'build', kind, str(path), selector, name,
+                     '-configuration', 'Debug', '-sdk', 'iphonesimulator',
+                     'CODE_SIGNING_ALLOWED=NO', 'CODE_SIGNING_REQUIRED=NO']
+          if selector == '-scheme':
+              command += ['-destination', 'generic/platform=iOS Simulator',
+                          '-derivedDataPath', str(out / 'DerivedData')]
+          else:
+              command += [f'CONFIGURATION_BUILD_DIR={out}/Debug-iphonesimulator']
+          raise SystemExit(subprocess.call(command))
+          PY
+
+      - name: Preparar el ZIP per a Appetize
         script: |
           set -eu
-          APP=$(find "$CM_BUILD_DIR/DerivedData/Build/Products/Debug-iphonesimulator" \
-            -maxdepth 1 -type d -name '*.app' -print -quit)
+          APP=$(find ios-build -type d -name '*.app' -print -quit)
           if [ -z "$APP" ]; then
-            echo 'ERROR: No sha generat cap aplicacio .app per al simulador.'
+            echo 'ERROR: la compilacio no ha generat cap aplicacio .app.'
             exit 1
           fi
-          mkdir -p "$CM_BUILD_DIR/artifacts"
-          ditto -c -k --keepParent "$APP" \
-            "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
+          mkdir -p artifacts
+          ditto -c -k --keepParent "$APP" artifacts/lagenda-ios-simulator.zip
+          echo 'Aplicacio preparada: artifacts/lagenda-ios-simulator.zip'
 
     artifacts:
       - artifacts/lagenda-ios-simulator.zip
-      - DerivedData/Build/Products/Debug-iphonesimulator/*.app
+      - ios-build/**/*.app
+      - /tmp/xcodebuild_logs/*.log
