@@ -1,96 +1,60 @@
 workflows:
-  lagenda-ios-simulator:
-    name: L'Agenda - iPhone virtual
+  lagenda-ios-projecte-complet:
+    name: "L'Agenda - iPhone PROJECTE COMPLET"
     instance_type: mac_mini_m2
     max_build_duration: 120
     environment:
       xcode: latest
-      cocoapods: default
+      java: 17
+
     scripts:
-      - name: Diagnosticar els projectes iOS
+      - name: "1 - Comprovar estructura iOS i Kotlin"
         script: |
-          echo '===== ARXIUS XCODE ====='
-          find . -maxdepth 6 -type d \( -name '*.xcodeproj' -o -name '*.xcworkspace' \) \
-            -not -path '*/node_modules/*' -not -path '*/Pods/*' -not -path '*/.git/*' -print || true
-          echo '===== ESQUEMES COMPARTITS ====='
-          find . -maxdepth 8 -type f -name '*.xcscheme' \
-            -not -path '*/node_modules/*' -not -path '*/Pods/*' -not -path '*/.git/*' -print || true
-          echo '===== PROJECTES NATIUS iOS ====='
-          find . -maxdepth 8 -type f -name 'project.pbxproj' \
-            -not -path '*/node_modules/*' -not -path '*/Pods/*' -not -path '*/.git/*' -print || true
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          echo "=== LAGENDA PROJECTE COMPLET ==="
+          echo "Repositorio: $CM_BUILD_DIR"
+          test -f iosApp/AgendaIOS.xcodeproj/project.pbxproj || {
+            echo "ERROR: Falta iosApp/AgendaIOS.xcodeproj/project.pbxproj al repositori"
+            exit 1
+          }
+          test -f iosApp/AgendaIOS.xcodeproj/xcshareddata/xcschemes/AgendaIOS.xcscheme || {
+            echo "ERROR: Falta iosApp/AgendaIOS.xcodeproj/xcshareddata/xcschemes/AgendaIOS.xcscheme"
+            exit 1
+          }
+          test -f gradlew || { echo "ERROR: Falta gradlew a l'arrel"; exit 1; }
+          test -d shared || { echo "ERROR: Falta la carpeta shared a l'arrel"; exit 1; }
+          test -f settings.gradle.kts || { echo "ERROR: Falta settings.gradle.kts a l'arrel"; exit 1; }
+          chmod +x gradlew
+          xcodebuild -list -project iosApp/AgendaIOS.xcodeproj
+          echo "OK: projecte i esquema a la ruta correcta"
 
-      - name: Preparar dependències
+      - name: "2 - Compilar realment AgendaIOS per al simulador"
         script: |
-          set -eu
-          if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
-          if [ -f pubspec.yaml ]; then flutter pub get; fi
-          if [ -f package.json ]; then
-            if [ -f package-lock.json ]; then npm ci; else npm install; fi
-          fi
-          for path in ios/Podfile iosApp/Podfile Podfile; do
-            if [ -f "$path" ]; then
-              (cd "$(dirname "$path")" && pod install)
-            fi
-          done
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          mkdir -p "$CM_BUILD_DIR/artifacts"
+          xcodebuild build \
+            -project iosApp/AgendaIOS.xcodeproj \
+            -scheme AgendaIOS \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee "$CM_BUILD_DIR/artifacts/xcodebuild.log"
 
-      - name: Detectar projecte real i compilar per a iPhone
+      - name: "3 - Generar ZIP per a Appetize"
         script: |
-          python3 - <<'PY'
-          import json
-          import os
-          import pathlib
-          import subprocess
-          import sys
+          set -euo pipefail
+          APP="$CM_BUILD_DIR/DerivedData/Build/Products/Debug-iphonesimulator/AgendaIOS.app"
+          test -d "$APP" || { echo "ERROR: No s'ha generat AgendaIOS.app"; exit 1; }
+          mkdir -p "$CM_BUILD_DIR/artifacts"
+          ditto -c -k --keepParent "$APP" "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
+          test -s "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
+          echo "OK: artifacts/lagenda-ios-simulator.zip generat"
 
-          root = pathlib.Path.cwd()
-          excluded = {'.git', 'Pods', 'node_modules', '.gradle', 'build', 'DerivedData', '.build'}
-          projects, workspaces = [], []
-          for folder, subdirs, _ in os.walk(root):
-              for directory in list(subdirs):
-                  item = pathlib.Path(folder) / directory
-                  if directory in excluded:
-                      subdirs.remove(directory)
-                  elif directory.endswith('.xcodeproj'):
-                      if (item / 'project.pbxproj').is_file():
-                          projects.append(item)
-                      subdirs.remove(directory)
-                  elif directory.endswith('.xcworkspace'):
-                      workspaces.append(item)
-                      subdirs.remove(directory)
-
-          def rank(path):
-              name = str(path.relative_to(root)).lower()
-              return (0 if name.startswith('iosapp/') or name.startswith('ios/') else 1,
-                      0 if 'lagenda' in name or 'runner' in name or 'iosapp' in name else 1,
-                      len(name))
-
-          def inspect(kind, path):
-              command = ['xcodebuild', '-list', '-json', kind, str(path)]
-              result = subprocess.run(command, capture_output=True, text=True)
-              if result.returncode != 0:
-                  print('No es pot llegir', path, ':', result.stderr[-1200:], flush=True)
-                  return [], []
-              try:
-                  data = json.loads(result.stdout)
-                  info = data.get('project') or data.get('workspace') or {}
-                  return info.get('schemes', []) or [], info.get('targets', []) or []
-              except json.JSONDecodeError:
-                  print('Resposta de Xcode no valida per a', path, flush=True)
-                  return [], []
-
-          preferred = ('iosapp', 'lagenda', "l'agenda", 'agenda', 'runner', 'app')
-          choices = []
-          for proj in sorted(projects, key=rank):
-              schemes, targets = inspect('-project', proj)
-              print(f'PROJECTE {proj.relative_to(root)}: schemes={schemes}; targets={targets}', flush=True)
-              for scheme in schemes:
-                  choices.append((rank(proj), '-project', proj, '-scheme', scheme))
-              if not schemes and len(targets) == 1:
-                  choices.append((rank(proj), '-project', proj, '-target', targets[0]))
-
-          for ws in sorted(workspaces, key=rank):
-              schemes, _ = inspect('-workspace', ws)
-              print(f'WORKSPACE {ws.relative_to(root)}: schemes={schemes}', flush=True)
-              for scheme in schemes:
-                  # Preferim el projecte si el workspace es orfe o no te un esquema real.
-                  matched = any(p.parent == ws.parent and p.stem == ws.stem for p in projects)
+    artifacts:
+      - artifacts/lagenda-ios-simulator.zip
+      - artifacts/xcodebuild.log

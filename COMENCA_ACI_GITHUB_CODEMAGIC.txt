@@ -1,0 +1,21 @@
+L'AGENDA — PUJAR PROJECTE COMPLET A GITHUB (WINDOWS)
+
+Aquesta carpeta descomprimida ha de ser el CONTINGUT de l'arrel del repositori lagenda.
+Han d'estar junts, al mateix nivell:
+- codemagic.yaml
+- gradlew
+- settings.gradle.kts
+- build.gradle.kts
+- shared/ (carpeta)
+- iosApp/ (carpeta, amb AgendaIOS.xcodeproj)
+
+1. Descomprimeix aquest ZIP en una carpeta temporal.
+2. Obre GitHub Desktop > Repository > Show in Explorer per trobar l'arrel REAL del repositori.
+3. Copia el CONTINGUT de la carpeta temporal (no la carpeta contenedora) a l'arrel del repositori.
+4. Si tenies un AgendaIOS.xcodeproj solt a l'arrel, es tracta d'una copia desubicada.
+   Pots eliminar aquesta copia i project.xcworkspace solt NOMÉS quan iosApp/AgendaIOS.xcodeproj ja estiga copiat.
+5. A GitHub Desktop: commit, Push origin.
+6. A Codemagic: branca main, refresca workflows i tria "L'Agenda - iPhone PROJECTE COMPLET".
+
+AVIS: no es una aplicacio iOS compilada. Es codi font preparat per a INTENTAR compilar-lo
+al nuvol. Kotlin/Swift encara no verificats en macOS/Xcode.
