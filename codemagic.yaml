@@ -1,0 +1,91 @@
+
+workflows:
+  lagenda-ios-simulator:
+    name: L'Agenda - iPhone virtual
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Preparar projecte
+        script: |
+          set -eu
+          if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
+          PODFILE=$(find . -name Podfile -not -path '*/Pods/*' -not -path '*/node_modules/*' -print -quit)
+          if [ -n "$PODFILE" ]; then
+            (cd "$(dirname "$PODFILE")" && pod install)
+          fi
+
+      - name: Compilar per a simulador iPhone
+        script: |
+          set -eu
+
+          # Preferim iosApp, pero tambe busquem altres projectes Xcode.
+          if [ -d iosApp/iosApp.xcworkspace ]; then
+            KIND=-workspace
+            TARGET=iosApp/iosApp.xcworkspace
+          elif [ -d iosApp/iosApp.xcodeproj ]; then
+            KIND=-project
+            TARGET=iosApp/iosApp.xcodeproj
+          else
+            TARGET=$(find . -type d -name '*.xcworkspace' \
+              -not -path '*/Pods/*' -not -path '*/node_modules/*' \
+              -not -path '*.xcodeproj/*' -print -quit)
+            KIND=-workspace
+            if [ -z "$TARGET" ]; then
+              TARGET=$(find . -type d -name '*.xcodeproj' \
+                -not -path '*/Pods/*' -not -path '*/node_modules/*' \
+                -print -quit)
+              KIND=-project
+            fi
+          fi
+
+          if [ -z "$TARGET" ]; then
+            echo 'ERROR: No hi ha cap projecte .xcodeproj ni .xcworkspace.'
+            echo 'Cal pujar el projecte iOS; un projecte nomes Android no es pot compilar per a iPhone.'
+            exit 1
+          fi
+
+          echo "Projecte trobat: $TARGET"
+          SCHEME=$(xcodebuild -list -json "$KIND" "$TARGET" | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          schemes = (data.get("project") or data.get("workspace") or {}).get("schemes", [])
+          preferred = next((s for s in schemes if s.lower() in ("iosapp", "lagenda", "l agenda", "agenda")), None)
+          if preferred:
+              print(preferred)
+          elif len(schemes) == 1:
+              print(schemes[0])
+          else:
+              sys.stderr.write("ERROR: No es pot triar esquema automaticament: " + ", ".join(schemes) + "\n")
+              sys.exit(1)
+          ')
+
+          echo "Esquema: $SCHEME"
+          xcodebuild build \
+            "$KIND" "$TARGET" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Crear ZIP per a Appetize
+        script: |
+          set -eu
+          APP=$(find "$CM_BUILD_DIR/DerivedData/Build/Products/Debug-iphonesimulator" \
+            -maxdepth 1 -type d -name '*.app' -print -quit)
+          if [ -z "$APP" ]; then
+            echo 'ERROR: No sha generat cap aplicacio .app per al simulador.'
+            exit 1
+          fi
+          mkdir -p "$CM_BUILD_DIR/artifacts"
+          ditto -c -k --keepParent "$APP" \
+            "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
+
+    artifacts:
+      - artifacts/lagenda-ios-simulator.zip
+      - DerivedData/Build/Products/Debug-iphonesimulator/*.app
