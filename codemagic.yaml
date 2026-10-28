@@ -1,12 +1,6 @@
-
 workflows:
-<<<<<<< HEAD
   lagenda-ios-projecte-complet:
     name: "L'Agenda - iPhone PROJECTE COMPLET"
-=======
-  lagenda-compilacio-iphone:
-    name: "L'Agenda - COMPILACIO REAL iPhone"
->>>>>>> 4638c9aeb814566dcd137a689145626b3288f32e
     instance_type: mac_mini_m2
     max_build_duration: 120
     environment:
@@ -14,29 +8,26 @@ workflows:
       java: 17
 
     scripts:
-<<<<<<< HEAD
-      - name: "1 - Comprovar estructura iOS i Kotlin"
+      - name: "1 - Comprovar fitxers d'iOS i Kotlin"
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
-          echo "=== LAGENDA PROJECTE COMPLET ==="
-          echo "Repositorio: $CM_BUILD_DIR"
-          test -f iosApp/AgendaIOS.xcodeproj/project.pbxproj || {
-            echo "ERROR: Falta iosApp/AgendaIOS.xcodeproj/project.pbxproj al repositori"
+          echo "=== L'AGENDA: COMPROVACIO ==="
+          for FILE in iosApp/AgendaIOS.xcodeproj/project.pbxproj iosApp/AgendaIOS.xcodeproj/xcshareddata/xcschemes/AgendaIOS.xcscheme gradlew settings.gradle.kts; do
+            if [ ! -f "$FILE" ]; then
+              echo "ERROR: Falta $FILE al repositori. Has de pujar el contingut del ZIP complet, no nomes AgendaIOS.xcodeproj."
+              exit 1
+            fi
+          done
+          if [ ! -d shared ]; then
+            echo "ERROR: Falta la carpeta shared al repositori."
             exit 1
-          }
-          test -f iosApp/AgendaIOS.xcodeproj/xcshareddata/xcschemes/AgendaIOS.xcscheme || {
-            echo "ERROR: Falta iosApp/AgendaIOS.xcodeproj/xcshareddata/xcschemes/AgendaIOS.xcscheme"
-            exit 1
-          }
-          test -f gradlew || { echo "ERROR: Falta gradlew a l'arrel"; exit 1; }
-          test -d shared || { echo "ERROR: Falta la carpeta shared a l'arrel"; exit 1; }
-          test -f settings.gradle.kts || { echo "ERROR: Falta settings.gradle.kts a l'arrel"; exit 1; }
+          fi
           chmod +x gradlew
           xcodebuild -list -project iosApp/AgendaIOS.xcodeproj
-          echo "OK: projecte i esquema a la ruta correcta"
+          echo "OK: projecte iOS, esquema i estructura Kotlin detectats"
 
-      - name: "2 - Compilar realment AgendaIOS per al simulador"
+      - name: "2 - Compilar L'Agenda per a simulador iPhone"
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
@@ -48,94 +39,24 @@ workflows:
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            2>&1 | tee "$CM_BUILD_DIR/artifacts/xcodebuild.log"
-
-      - name: "3 - Generar ZIP per a Appetize"
-        script: |
-          set -euo pipefail
-          APP="$CM_BUILD_DIR/DerivedData/Build/Products/Debug-iphonesimulator/AgendaIOS.app"
-          test -d "$APP" || { echo "ERROR: No s'ha generat AgendaIOS.app"; exit 1; }
-          mkdir -p "$CM_BUILD_DIR/artifacts"
-          ditto -c -k --keepParent "$APP" "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
-          test -s "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
-          echo "OK: artifacts/lagenda-ios-simulator.zip generat"
-
-=======
-      - name: "1 - Comprovar projecte i dependències"
-        script: |
-          #!/bin/bash
-          set -euo pipefail
-          echo "=== L'AGENDA: COMPILACIO REAL ==="
-
-          PROJECT=$(find "$CM_BUILD_DIR" -type d -name 'AgendaIOS.xcodeproj' -not -path '*/.git/*' -print -quit)
-
-          if [ -z "$PROJECT" ] || [ ! -f "$PROJECT/project.pbxproj" ]; then
-            echo "ERROR: No s'ha trobat AgendaIOS.xcodeproj amb project.pbxproj al repositori."
-            exit 1
-          fi
-
-          ROOT=$(dirname "$(dirname "$PROJECT")")
-
-          if [ ! -f "$ROOT/gradlew" ] || [ ! -d "$ROOT/shared" ]; then
-            echo "ERROR: El projecte Xcode existeix, però no té gradlew i shared a la seua carpeta superior."
-            echo "Projecte Xcode: $PROJECT"
-            echo "Carpeta on calen gradlew i shared: $ROOT"
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT/xcshareddata/xcschemes/AgendaIOS.xcscheme" ]; then
-            echo "ERROR: Falta l'esquema compartit AgendaIOS.xcscheme."
-            exit 1
-          fi
-
-          chmod +x "$ROOT/gradlew"
-          echo "$PROJECT" > "$CM_BUILD_DIR/lagenda-project-path.txt"
-          echo "PROJECTE SELECCIONAT: $PROJECT"
-          xcodebuild -list -project "$PROJECT"
-
-      - name: "2 - Compilar L'Agenda per a iPhone"
-        script: |
-          #!/bin/bash
-          set -euo pipefail
-
-          PROJECT=$(cat "$CM_BUILD_DIR/lagenda-project-path.txt")
-          mkdir -p "$CM_BUILD_DIR/artifacts"
-
-          xcodebuild build \
-            -project "$PROJECT" \
-            -scheme AgendaIOS \
-            -configuration Debug \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee "$CM_BUILD_DIR/artifacts/xcodebuild.log"
 
-      - name: "3 - Preparar descarrega d'Appetize"
+      - name: "3 - Crear ZIP per a Appetize"
         script: |
-          #!/bin/bash
           set -euo pipefail
-
           APP="$CM_BUILD_DIR/DerivedData/Build/Products/Debug-iphonesimulator/AgendaIOS.app"
-
           if [ ! -d "$APP" ]; then
-            echo "ERROR: No s'ha generat AgendaIOS.app."
+            echo "ERROR: No s'ha generat AgendaIOS.app"
             exit 1
           fi
-
           mkdir -p "$CM_BUILD_DIR/artifacts"
-
-          ditto -c -k --keepParent "$APP" \
-            "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
-
+          ditto -c -k --keepParent "$APP" "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
           test -s "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
-          echo "OK: app compilada i ZIP creat correctament."
+          echo "OK: lagenda-ios-simulator.zip generat"
 
->>>>>>> 4638c9aeb814566dcd137a689145626b3288f32e
     artifacts:
       - artifacts/lagenda-ios-simulator.zip
       - artifacts/xcodebuild.log
