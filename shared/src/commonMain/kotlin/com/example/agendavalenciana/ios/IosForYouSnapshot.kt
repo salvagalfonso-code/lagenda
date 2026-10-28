@@ -24,8 +24,16 @@ object IosForYouSnapshot {
             append('|'); comarques.sorted().forEach { append(it); append(';') }
             append('|'); radii.toSortedMap().forEach { (k,v) -> append(k); append(':'); append(v); append(';') }
             append('|'); append(suggestions); append(':'); append(discovery.name); append(':'); append(valencianFirst)
-            append('|'); entityStyles.toSortedMap().forEach { (name,codes) ->
-                append(name); append('='); codes.sorted().forEach { append(it); append(',') }; append(';')
+            append('|')
+            // Bucle explicit: evita inferencia/desestructuracio amb lambdes imbricades en Kotlin/Native.
+            for (name in entityStyles.keys.sorted()) {
+                append(name)
+                append('=')
+                for (code in entityStyles[name].orEmpty().sorted()) {
+                    append(code)
+                    append(',')
+                }
+                append(';')
             }
             append('|'); paid.guaranteedEventIds.sorted().forEach { append(it); append(';') }
             append('|'); paid.ads.forEach { append(it.id); append(';') }

@@ -6,10 +6,11 @@ import platform.Foundation.NSTimeZone
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
-actual fun currentEpochMillis(): Long = (NSDate().timeIntervalSince1970 * 1000.0).toLong()
+// Kotlin stdlib Clock evita els membres NSDate no resolts pel compilador Kotlin/Native.
+actual fun currentEpochMillis(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
 actual fun currentLocalDateIso(): String = NSDateFormatter().apply {
     dateFormat = "yyyy-MM-dd"
-    timeZone = NSTimeZone.timeZoneWithName("Europe/Madrid")
+    timeZone = NSTimeZone(name = "Europe/Madrid")
 }.stringFromDate(NSDate())
 
 actual fun platformReadPublicCache(key: String): String =
