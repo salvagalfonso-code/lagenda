@@ -7,6 +7,7 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.*
 import kotlinx.serialization.json.*
 import com.example.agendavalenciana.model.IosSavedListInvitation
+import com.example.agendavalenciana.model.IosAdminPermissions
 
 /** API contract backed by the PHP endpoints bundled with the v336 server snapshot. */
 interface IosSessionBridge {
@@ -24,12 +25,32 @@ interface IosSessionBridge {
     fun showTicketScanner(eventId: Int)
     /** Opens iOS notification permission settings. */
     fun showNotificationSettings()
+    /** Opens the native iOS share sheet for a saved-list invitation. */
+    fun shareText(text: String)
+    /** Ask iOS for remote notifications; registration with APNs happens asynchronously. */
+    fun requestRemoteNotifications(callback: IosReminderSchedulingCallback)
+    fun setPushOpenListener(listener: IosPushOpenCallback)
+    /** Native identity-provider UI; ID token + nonce are verified by our server. */
+    fun beginSocialSignIn(provider: String, callback: IosSocialAuthCallback)
+    /** Photos are JPEG-compressed before crossing the KMP bridge, not kept in preferences. */
+    fun pickProfilePhoto(callback: IosPickedPhotoCallback)
+    fun eraseLocalAccountData(userId: Int)
+}
+
+interface IosSocialAuthCallback {
+    fun onComplete(idToken: String, nonce: String, error: String)
+}
+interface IosPickedPhotoCallback {
+    fun onComplete(base64Jpeg: String, error: String)
 }
 
 /** Completion is invoked only after Apple's notification center accepts or rejects the request. */
 interface IosReminderSchedulingCallback {
     fun onResult(success: Boolean, message: String)
 }
+
+/** A tapped APNs artist alert opens the corresponding artist popup, including when resumed. */
+interface IosPushOpenCallback { fun onOpenArtist(artist: String) }
 
 /** The iOS bridge is installed before any Compose state is restored. */
 object IosNativeBridge {
@@ -109,11 +130,86 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
         return IosAccount(person.text("id").toIntOrNull() ?: 0, person.text("username"), person.text("email"), person.text("role"))
             .also { account = it }
     }
+    /** No social provider credential is accepted as our own API bearer token. */
+    suspend fun signInWithProvider(provider: String, idToken: String, nonce: String): IosAccount {
+        val path = when (provider.uppercase()) {
+            "APPLE" -> "auth/apple-ios.php"
+            "GOOGLE" -> "auth/google-ios.php"
+            else -> error("Proveïdor no admés")
+        }
+        require(idToken.length > 100 && nonce.length in 16..256) { "Credencial d'identitat incompleta" }
+        val root = request(path, buildJsonObject {
+            put("id_token", idToken); put("nonce", nonce); put("device_name", "iOS l'Agenda KMP")
+        })
+        val newToken = root.text("token")
+        require(newToken.length >= 32) { "El servidor no ha creat una sessió vàlida." }
+        val user = root["user"] as? JsonObject ?: error("El servidor no ha retornat un compte")
+        val result = IosAccount(user.text("id").toIntOrNull() ?: 0, user.text("username"), user.text("email"), user.text("role"))
+        require(result.id > 0) { "Identificador de compte invàlid" }
+        token = newToken
+        sessionBridge?.saveToken(newToken)
+        account = result
+        return result
+    }
+
+    suspend fun myPublicProfile(): IosMyProfile {
+        val root = request("account/profile-ios.php", authenticated = true)
+        val profile = root["profile"] as? JsonObject ?: error("No s'ha rebut el perfil")
+        return IosMyProfile(profile.text("display_name"), profile.text("bio"),
+            resolveProfileImage(profile.text("image_url")))
+    }
+    suspend fun updateMyPublicProfile(displayName: String, bio: String = "", removeImage: Boolean = false): IosMyProfile {
+        val username = account?.username ?: error("No hi ha compte")
+        require(displayName.trim().length in 1..190) { "Nom de perfil invàlid" }
+        val root = request("account/profile-ios-edit.php", buildJsonObject {
+            put("display_name", displayName.trim())
+            put("bio", bio.take(3000)); put("remove_image", removeImage)
+        }, authenticated = true)
+        val profile = root["profile"] as? JsonObject ?: error("No s'ha rebut el perfil actualitzat")
+        return IosMyProfile(profile.text("display_name"), profile.text("bio"),
+            resolveProfileImage(profile.text("image_url")))
+    }
+    suspend fun uploadMyPhoto(base64Jpeg: String): String {
+        val username = account?.username ?: error("No hi ha compte")
+        require(base64Jpeg.length in 100..8_000_000) { "Imatge massa gran o buida" }
+        val root = request("images/upload.php", buildJsonObject {
+            put("owner_type", "USER"); put("owner_key", username)
+            put("image_base64", base64Jpeg); put("mime_type", "image/jpeg")
+        }, authenticated = true)
+        return resolveProfileImage(root.text("image_url"))
+    }
+    private fun resolveProfileImage(raw: String): String = when {
+        raw.startsWith("https://") -> raw
+        raw.startsWith("/") -> "https://quimerafest.com" + raw
+        raw.startsWith("images/") -> "https://quimerafest.com/app/" + raw
+        else -> ""
+    }
+    /** Requires an explicit phrase and, for password accounts, a recent password recheck on the server. */
+    suspend fun deleteMyAccount(confirmation: String, password: String) {
+        require(confirmation == "ELIMINAR") { "Cal confirmar la baixa escrivint ELIMINAR." }
+        request("account/delete-ios.php", buildJsonObject {
+            put("confirmation", confirmation)
+            put("password", password)
+        }, authenticated = true)
+        // Only clear the Keychain after the server confirms irreversible deactivation.
+        signOut()
+    }
     fun signOut() { token = null; account = null; sessionBridge?.clearToken() }
+    /** Revoke this phone's APNs token before invalidating the session. */
+    private suspend fun unregisterRemoteDevice() {
+        val deviceToken = platformReadPublicCache("apns_device_token")
+        if (deviceToken.isNotBlank()) request("notifications/apns-device.php", buildJsonObject {
+            put("action", "unregister"); put("device_token", deviceToken)
+        }, authenticated = true)
+    }
     /** Revokes the server token when online; offline logout still destroys its local copy. */
     suspend fun signOutSecurely() {
-        try { if (!token.isNullOrBlank()) request("auth/logout.php", buildJsonObject { }, authenticated = true) }
-        finally { signOut() }
+        try {
+            if (!token.isNullOrBlank()) {
+                runCatching { unregisterRemoteDevice() }
+                request("auth/logout.php", buildJsonObject { }, authenticated = true)
+            }
+        } finally { signOut() }
     }
 
     /** Public event reports are accepted for guests too. A stable device-scoped ID is required
@@ -198,13 +294,13 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
             val filter = item["filters"] as? JsonObject ?: return@mapNotNull null
             IosSavedSearch(name, filter.text("town"), filter.names("categories"))
         }
-    suspend fun saveTownSearch(name: String, town: String) {
+    suspend fun saveTownSearch(name: String, town: String, categories: List<String> = emptyList()) {
         require(name.trim().length in 1..52) { "El nom del filtre ha de tindre entre 1 i 52 caràcters." }
         require(town.trim().length in 1..120) { "Tria una població abans de guardar el filtre." }
         request("preferences/search-filters.php", buildJsonObject {
             put("action", "save")
             put("name", name.trim())
-            put("filters", buildJsonObject { put("town", town.trim()); put("categories", JsonArray(emptyList())) })
+            put("filters", buildJsonObject { put("town", town.trim()); put("categories", JsonArray(categories.map { JsonPrimitive(it) })) })
         }, authenticated = true)
     }
     suspend fun removeSavedSearch(name: String) {
@@ -253,11 +349,45 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
     }
     suspend fun followArtist(artist: String, following: Boolean) =
         followEntity("ARTIST", artist.trim(), artist.trim(), following)
-    suspend fun notifications(): List<IosNotification> = request("notifications/mine.php", authenticated = true)
-        .items("notifications").map { IosNotification(it.text("id").toIntOrNull() ?: 0,
-            it.text("title"), it.text("body"), it.text("read_at").isNotBlank(), it.text("created_at"),
-            it.text("deep_link_type"), it.text("deep_link_value")) }
-    suspend fun markRead(id: Int) { request("notifications/read.php", buildJsonObject { put("id", id) }, authenticated = true) }
+    /** Artist bell subscription is independent of following. Preferences are per account on the server. */
+    suspend fun artistBells(): List<IosArtistBell> = request("notifications/artist-bell.php", authenticated = true)
+        .items("artists").mapNotNull { obj ->
+            val name = obj.text("artist_name").trim()
+            if (name.isBlank()) null else IosArtistBell(name,
+                IosArtistBellPolicy.parseFrequency(obj.text("frequency")), obj.bool("enabled"))
+        }
+    suspend fun saveArtistBell(artist: String, enabled: Boolean, frequency: String): IosArtistBell {
+        val name = artist.trim()
+        require(name.isNotEmpty() && name.length <= 190) { "Nom d'artista no vàlid." }
+        require(frequency in IosArtistBellPolicy.frequencies) { "Freqüència no vàlida." }
+        val result = request("notifications/artist-bell.php", buildJsonObject {
+            put("artist_name", name); put("enabled", enabled); put("frequency", frequency)
+        }, authenticated = true)
+        return IosArtistBell(result.text("artist_name").ifBlank { name },
+            IosArtistBellPolicy.parseFrequency(result.text("frequency")), result.bool("enabled"))
+    }
+    suspend fun notifications(): List<IosNotification> {
+        val main = request("notifications/mine.php", authenticated = true)
+            .items("notifications").map { IosNotification(it.text("id").toIntOrNull() ?: 0,
+                it.text("title"), it.text("body"), it.text("read_at").isNotBlank(), it.text("created_at"),
+                it.text("deep_link_type"), it.text("deep_link_value")) }
+        // Artist alerts are a separate inbox; negative IDs distinguish them from campaign messages.
+        val artist = runCatching { request("notifications/artist-inbox.php", authenticated = true)
+            .items("notifications").mapNotNull { item ->
+                val id = item.text("id").toIntOrNull()?.takeIf { it > 0 } ?: return@mapNotNull null
+                IosNotification(-id, item.text("title"), item.text("body"),
+                    item.text("read_at").isNotBlank(), item.text("created_at"),
+                    "NEW_ARTIST_EVENT", item.text("artist_name"))
+            }
+        }.getOrDefault(emptyList())
+        return (main + artist).sortedByDescending { it.createdAt }
+    }
+    suspend fun markRead(id: Int) {
+        if (id < 0) request("notifications/artist-inbox.php", buildJsonObject {
+            put("id", -id)
+        }, authenticated = true)
+        else request("notifications/read.php", buildJsonObject { put("id", id) }, authenticated = true)
+    }
     suspend fun ticketOptions(eventId: Int): List<IosTicketOption> =
         request("tickets/options.php?event_id=$eventId").items("options").map { option ->
             IosTicketOption(
@@ -289,33 +419,48 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
         // A HTTP 200 and ok=true may still report NOT_FOUND, ALREADY_USED or CANCELLED.
         return if (outcome == "VALIDATED") "Entrada validada. $message" else "Entrada NO validada ($outcome). $message"
     }
-    suspend fun createCommunityGroup(eventId: Int, title: String, type: String, open: Boolean): IosCommunityGroup {
+    suspend fun createCommunityGroup(eventId: Int, title: String, type: String, open: Boolean,
+                                     description: String = "", origin: String = "", meetingAt: String = "",
+                                     capacity: Int = 0): IosCommunityGroup {
         val root = request("community/create.php", buildJsonObject {
             put("event_id", eventId); put("title", title.trim()); put("type", type)
             put("access_mode", if (open) "OPEN" else "APPROVAL")
+            put("description", description.trim().take(1000)); put("origin_label", origin.trim().take(190))
+            if (meetingAt.isNotBlank()) put("meeting_at", meetingAt.trim())
+            if (capacity > 0) put("capacity", capacity.coerceAtMost(100))
         }, authenticated = true)
-        val g = root["group"] as? JsonObject ?: error("El servidor no ha retornat el grup.")
-        return IosCommunityGroup(g.text("id").toIntOrNull() ?: 0, eventId, g.text("title"),
-            g.text("type"), g.text("access_mode"), g.text("my_status"), g.text("description"),
-            g.text("creator_user_id").toIntOrNull() ?: 0)
+        val g = root["group"] as? JsonObject ?: error("El servidor no ha retornat el tauló.")
+        return decodeCommunityGroup(g)
+    }
+    suspend fun updateCommunityGroup(g: IosCommunityGroup, title: String, description: String,
+                                     origin: String, meeting: String, capacity: Int,
+                                     type: String, access: String): IosCommunityGroup {
+        val root = request("community/update.php", buildJsonObject {
+            put("group_id",g.id); put("title",title.trim()); put("description",description.trim())
+            put("origin_label",origin.trim()); put("meeting_at",meeting.trim())
+            if(capacity>0) put("capacity",capacity.coerceAtMost(100)) else put("capacity", JsonNull)
+            put("type",type);put("access_mode",access)
+        }, authenticated=true)
+        return decodeCommunityGroup(root["group"] as? JsonObject ?: error("Falten dades del tauló"))
+    }
+    suspend fun setCommunityStatus(groupId:Int, status:String) {
+        require(status in setOf("OPEN","CLOSED","CANCELLED"))
+        request("community/status.php",buildJsonObject{put("group_id",groupId);put("status",status)},authenticated=true)
     }
     suspend fun reportCommunityMessage(groupId: Int, messageId: Int, reason: String) {
-        require(reason.isNotBlank()) { "Cal indicar un motiu." }
+        require(groupId>0 && messageId>0 && reason.isNotBlank())
         request("community/report.php", buildJsonObject {
-            put("group_id", groupId); put("message_id", messageId); put("reason", reason.trim().take(500))
-        }, authenticated = true)
+            put("group_id",groupId);put("message_id",messageId);put("reason",reason.trim().take(500))
+        }, authenticated=true)
     }
-    suspend fun tickets(): List<IosTicket> = request("tickets/mine.php", authenticated = true)
-        .items("tickets").map { IosTicket(it.text("id"), it.text("event_id"), it.text("event_title", "title"),
-            it.text("status"), it.text("code")) }
-    suspend fun community(eventId: Int? = null): List<IosCommunityGroup> {
-        val path = if (eventId == null) "community/groups.php" else "community/groups.php?event_id=$eventId"
-        return request(path, authenticated = true).items("groups").map {
-            IosCommunityGroup(it.text("id").toIntOrNull() ?: 0, it.text("event_id").toIntOrNull() ?: 0,
-                it.text("title", "name"), it.text("type", "group_type"), it.text("access_mode"),
-                it.text("membership_status", "my_status"), it.text("description"),
-                it.text("creator_user_id").toIntOrNull() ?: 0)
-        }
+    suspend fun reportCommunityGroup(groupId:Int,reason:String) {
+        require(groupId>0 && reason.isNotBlank())
+        request("community/report.php",buildJsonObject {put("group_id",groupId);put("reason",reason.trim().take(500))},authenticated=true)
+    }
+    suspend fun community(eventId: Int? = null, mine: Boolean = false): List<IosCommunityGroup> {
+        val args = listOfNotNull(eventId?.let { "event_id=$it" }, if (mine) "mine=1" else null)
+        val path = "community/groups.php" + if (args.isEmpty()) "" else "?"+args.joinToString("&")
+        return request(path,authenticated=true).items("groups").map(::decodeCommunityGroup)
     }
     suspend fun pendingRequests(groupId: Int): List<IosMemberRequest> =
         request("community/requests.php?group_id=$groupId", authenticated = true).items("requests").map {
@@ -327,16 +472,73 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
             put("action", if (accept) "ACCEPT" else "REJECT")
         }, authenticated = true)
     }
-    suspend fun joinGroup(id: Int) { request("community/join.php", buildJsonObject { put("group_id", id) }, authenticated = true) }
-    suspend fun leaveGroup(id: Int) { request("community/leave.php", buildJsonObject { put("group_id", id) }, authenticated = true) }
+    suspend fun joinGroup(id: Int): String = request("community/join.php", buildJsonObject {put("group_id",id)},authenticated=true)
+        .text("membership_status")
+    suspend fun leaveGroup(id: Int) {request("community/leave.php",buildJsonObject{put("group_id",id)},authenticated=true)}
     suspend fun messages(id: Int): List<IosMessage> = request("community/messages.php?group_id=$id", authenticated = true)
-        .items("messages").map { IosMessage(it.text("id"), it.text("author"), it.text("body", "text"), it.text("created_at")) }
-    suspend fun sendMessage(id: Int, body: String) { request("community/send.php", buildJsonObject { put("group_id", id); put("text", body) }, authenticated = true) }
-    suspend fun batecs(): List<IosBatec> = request("batecs/index.php?offset=0&limit=50").items("batecs").mapNotNull {
-        val id = it.text("id").toIntOrNull()?.takeIf { n -> n > 0 } ?: return@mapNotNull null
-        IosBatec(id.toString(), it.text("event_id").toIntOrNull() ?: 0, it.text("event_artist", "artist_name"),
-            it.text("event_title", "title"), it.text("body", "caption", "text"), validMediaUrl(it.text("image_url", "media_url")),
-            it.text("story_key").ifBlank { "manual:$id" })
+        .items("messages").map { IosMessage(it.text("id"),it.text("author"),it.text("body","text"),
+            it.text("created_at"),it.text("user_id").toIntOrNull() ?: 0) }
+    suspend fun sendMessage(id: Int, body: String) {
+        require(body.isNotBlank() && body.length<=2000)
+        request("community/send.php",buildJsonObject{put("group_id",id);put("text",body.trim())},authenticated=true)
+    }
+    /** Blocking and moderation endpoints require SERVIDOR_COMUNITAT SQL+PHP patch. */
+    suspend fun blockedCommunityUsers(): List<IosCommunityUser> =
+        request("community/blocks.php",authenticated=true).items("blocked").map {
+            IosCommunityUser(it.text("user_id").toIntOrNull() ?: 0,it.text("display_name"))
+        }
+    suspend fun setCommunityBlocked(userId:Int,blocked:Boolean) {
+        require(userId>0)
+        request("community/blocks.php",buildJsonObject {put("user_id",userId)
+            put("action",if(blocked) "BLOCK" else "UNBLOCK")},authenticated=true)
+    }
+    suspend fun communityManageMembers(groupId:Int): IosCommunityManagement {
+        val root=request("community/manage.php?group_id=$groupId",authenticated=true)
+        return IosCommunityManagement(root.items("members").map {
+            IosCommunityMember(it.text("user_id").toIntOrNull()?:0,it.text("display_name"),it.text("role"),it.text("status"))
+        },root.items("bans").map {IosCommunityUser(it.text("user_id").toIntOrNull()?:0,it.text("display_name"))})
+    }
+    suspend fun moderateCommunityGroup(groupId:Int,action:String,userId:Int=0,messageId:Int=0) {
+        require(action in setOf("DELETE_MESSAGE","BAN_MEMBER","UNBAN_MEMBER"))
+        request("community/manage.php",buildJsonObject {put("group_id",groupId);put("action",action)
+            if(userId>0) put("user_id",userId)
+            if(messageId>0) put("message_id",messageId)},authenticated=true)
+    }
+    suspend fun communityReports(all:Boolean=false):List<IosCommunityReport> =
+        request("community/admin-reports.php?status="+if(all) "ALL" else "OPEN",authenticated=true)
+            .items("reports").map {IosCommunityReport(
+                it.text("id").toIntOrNull()?:0,it.text("group_id").toIntOrNull()?:0,
+                it.text("message_id").toIntOrNull()?:0,it.text("reported_user_id").toIntOrNull()?:0,
+                it.text("group_title"),it.text("reported_name"),it.text("reason"),it.text("message_body"),it.text("status")) }
+    suspend fun resolveCommunityReport(reportId:Int,action:String) {
+        require(action in setOf("DISMISS","REVIEW","DELETE_MESSAGE","CLOSE_GROUP","BAN_MEMBER"))
+        request("community/admin-reports.php",buildJsonObject {put("report_id",reportId);put("action",action)},authenticated=true)
+    }
+    /** Followed artists are sorted first by the server. Walk subsequent pages only when
+     *  the first 50 rows do not contain six DISTINCT followed artists.
+     *  A bounded scan avoids mistaking 50 publications by one artist for 50 Batecs. */
+    suspend fun batecs(followedArtists: Set<String> = emptySet()): List<IosBatec> {
+        val followed = followedArtists.map { it.trim().lowercase() }.filter(String::isNotBlank).toSet()
+        val collected = linkedMapOf<String, IosBatec>()
+        var offset = 0
+        repeat(if (followed.isEmpty()) 1 else 4) {
+            val root = request("batecs/index.php?offset=$offset&limit=50")
+            val items = root.items("batecs").mapNotNull {
+                val id = it.text("id").toIntOrNull()?.takeIf { n -> n > 0 } ?: return@mapNotNull null
+                IosBatec(id.toString(), it.text("event_id").toIntOrNull() ?: 0,
+                    it.text("event_artist", "artist_name"), it.text("event_title", "title"),
+                    it.text("body", "caption", "text"),
+                    validMediaUrl(it.text("image_url", "media_url")),
+                    it.text("story_key").ifBlank { "manual:$id" })
+            }
+            items.forEach { if (it.storyKey.isNotBlank()) collected.putIfAbsent(it.storyKey, it) }
+            val covered = collected.values.map { it.artist.trim().lowercase() }.filter { it in followed }.distinct().size
+            if (!root.bool("has_more") || items.isEmpty() || (followed.isNotEmpty() && covered >= 6))
+                return collected.values.toList()
+            offset = root.text("next_offset").toIntOrNull()?.takeIf { it > offset }
+                ?: (offset + items.size)
+        }
+        return collected.values.toList()
     }
     /** Seen state is account-specific, server authoritative, and never marked for guest users. */
     suspend fun seenBatecs(): Set<String> = request("batecs/seen.php", authenticated = true)
@@ -362,6 +564,74 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
         })
     }
 
+    /** Read-only administration: each route enforces SUPER_ADMIN in PHP. */
+    suspend fun adminDashboard(days: Int = 30): JsonObject =
+        request("admin/dashboard.php?days=${days.coerceIn(1, 365)}", authenticated = true)
+
+    suspend fun adminUsers(): List<JsonObject> =
+        request("admin/users.php", authenticated = true).items("users")
+
+    suspend fun adminUserDetail(userId: Int): JsonObject {
+        require(userId > 0)
+        return request("admin/user-detail.php?user_id=$userId&days=90", authenticated = true)
+    }
+
+    /** Requires deploying SERVIDOR_SUPERADMIN_IOS; does not edit profile fields. */
+    suspend fun adminSetUserAccess(userId: Int, role: String, active: Boolean): JsonObject {
+        require(userId > 0 && IosAdminPermissions.validRole(role))
+        require(account?.role == "SUPER_ADMIN")
+        require(account?.id != userId) { "No pots canviar els teus propis permisos." }
+        return request("admin/user-access-ios.php", buildJsonObject {
+            put("user_id", userId); put("role", role); put("active", active)
+            put("confirmation", "CANVIAR ACCES")
+        }, authenticated = true)
+    }
+
+    suspend fun adminFindEvents(query: String, page: Int = 1): JsonObject =
+        request("admin/events.php?q=${query.trim().take(180).encodeURLParameter()}&page=${page.coerceIn(1, 10000)}&limit=25", authenticated = true)
+
+    /** Existing server endpoint anonymizes account; it never hard-deletes fiscal records. */
+    suspend fun adminDeleteUser(userId: Int, username: String): JsonObject {
+        require(userId > 0 && username.isNotBlank() && userId != account?.id)
+        return request("admin/user-delete.php", buildJsonObject {
+            put("user_id", userId); put("confirmation", "ELIMINAR $username")
+        }, authenticated = true)
+    }
+
+    suspend fun adminEventReports(): List<JsonObject> =
+        request("admin/reports.php", authenticated = true).items("reports")
+
+    suspend fun adminCommunityPending(): List<JsonObject> =
+        request("events/community-pending.php", authenticated = true).items("items")
+
+    suspend fun adminReviewCommunity(eventId: Int, decision: String, notes: String) {
+        require(eventId > 0 && decision in setOf("APPROVE", "REJECT"))
+        if (decision == "REJECT") require(notes.trim().length >= 12)
+        request("events/community-review.php", buildJsonObject {
+            put("event_id", eventId); put("decision", decision); put("notes", notes.trim().take(2000))
+        }, authenticated = true)
+    }
+
+    suspend fun adminModerateEvent(eventId: Int, action: String, reason: String) {
+        require(eventId > 0 && action in setOf("APPROVE", "REMOVE_CONFIRMED", "RESTORE"))
+        if (action == "REMOVE_CONFIRMED") require(reason.trim().length >= 12)
+        request("moderation/review.php", buildJsonObject {
+            put("event_id", eventId); put("action", action); put("reason", reason.trim().take(2000))
+        }, authenticated = true)
+    }
+
+    suspend fun adminPreviewTargets(filters: JsonObject): JsonObject =
+        request("admin/notifications-preview.php", buildJsonObject { put("filters", filters) }, authenticated = true)
+
+    suspend fun adminSendTargets(title: String, body: String, count: Int, filters: JsonObject): JsonObject {
+        require(title.trim().isNotBlank() && body.trim().isNotBlank() && count > 0)
+        return request("admin/notifications-send.php", buildJsonObject {
+            put("filters", filters)
+            put("title", title.trim().take(160)); put("body", body.trim().take(1200))
+            put("expected_count", count); put("confirmation", "ENVIAR")
+        }, authenticated = true)
+    }
+
     suspend fun adminPreview(): Int {
         val root = request("admin/notifications-preview.php", buildJsonObject {
             put("filters", buildJsonObject { put("all_users", true); put("platform", "") })
@@ -384,9 +654,23 @@ data class IosUserState(val follows: List<IosFollow> = emptyList(), val saved: S
 }
 data class IosNotification(val id: Int, val title: String, val body: String, val read: Boolean, val createdAt: String, val linkType: String, val linkValue: String)
 data class IosTicket(val id: String, val eventId: String, val eventTitle: String, val status: String, val code: String)
-data class IosCommunityGroup(val id: Int, val eventId: Int, val title: String, val type: String, val access: String, val membership: String, val description: String, val creatorUserId: Int = 0)
+data class IosCommunityGroup(val id: Int, val eventId: Int, val title: String, val type: String,
+    val access: String, val membership: String, val description: String, val creatorUserId: Int = 0,
+    val status: String = "OPEN", val origin: String = "", val meeting: String = "", val capacity: Int = 0,
+    val participants: Int = 0, val creatorName: String = "")
+data class IosCommunityUser(val id: Int, val name: String)
+data class IosCommunityMember(val id:Int,val name:String,val role:String,val status:String)
+data class IosCommunityManagement(val members:List<IosCommunityMember>,val bans:List<IosCommunityUser>)
+data class IosCommunityReport(val id:Int,val groupId:Int,val messageId:Int,val reportedUserId:Int,
+    val groupTitle:String,val reportedName:String,val reason:String,val messageText:String,val status:String)
+internal fun decodeCommunityGroup(g: JsonObject): IosCommunityGroup = IosCommunityGroup(
+    g.text("id").toIntOrNull()?:0,g.text("event_id").toIntOrNull()?:0,g.text("title","name"),
+    g.text("type","group_type"),g.text("access_mode"),g.text("membership_status","my_status"),
+    g.text("description"),g.text("creator_user_id").toIntOrNull()?:0,g.text("status").ifBlank{"OPEN"},
+    g.text("origin_label"),g.text("meeting_at"),g.text("capacity").toIntOrNull()?:0,
+    g.text("participant_count").toIntOrNull()?:0,g.text("creator_name"))
 data class IosMemberRequest(val userId: Int, val displayName: String, val requestedAt: String)
-data class IosMessage(val id: String, val author: String, val body: String, val createdAt: String)
+data class IosMessage(val id: String, val author: String, val body: String, val createdAt: String, val userId:Int=0)
 data class IosBatec(val id: String, val eventId: Int, val artist: String, val eventTitle: String, val text: String, val imageUrl: String, val storyKey: String = "")
 data class IosAd(val id: String, val eventId: Int, val placement: String, val imageUrl: String,
                      val focusX: Float = 0.5f, val focusY: Float = 0.5f)
@@ -425,3 +709,6 @@ internal fun decodePromoted(root: JsonObject): IosPromoted {
     val events = IosEventCatalog.decodeObjects(root.items("priority_events") + root.items("events"))
     return IosPromoted(ids + ads.map { it.eventId }, ads, events)
 }
+
+/** Public profile data; personal images are always stored by the server. */
+data class IosMyProfile(val displayName: String, val bio: String, val photoUrl: String)

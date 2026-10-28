@@ -22,26 +22,10 @@ object IosForYouSnapshot {
             append('|'); subcategories.sorted().forEach { append(it); append(';') }
             append('|'); towns.sorted().forEach { append(it); append(';') }
             append('|'); comarques.sorted().forEach { append(it); append(';') }
-            append('|')
-            // Evitar la desestructuracio (k, v): Kotlin/Native no pot inferir component2() aci.
-            for (townName: String in radii.keys.sorted()) {
-                val radiusKm: Int = radii[townName] ?: continue
-                append(townName)
-                append(':')
-                append(radiusKm)
-                append(';')
-            }
+            append('|'); radii.toSortedMap().forEach { (k,v) -> append(k); append(':'); append(v); append(';') }
             append('|'); append(suggestions); append(':'); append(discovery.name); append(':'); append(valencianFirst)
-            append('|')
-            // Bucle explicit: evita inferencia/desestructuracio amb lambdes imbricades en Kotlin/Native.
-            for (name in entityStyles.keys.sorted()) {
-                append(name)
-                append('=')
-                for (code in entityStyles[name].orEmpty().sorted()) {
-                    append(code)
-                    append(',')
-                }
-                append(';')
+            append('|'); entityStyles.toSortedMap().forEach { (name,codes) ->
+                append(name); append('='); codes.sorted().forEach { append(it); append(',') }; append(';')
             }
             append('|'); paid.guaranteedEventIds.sorted().forEach { append(it); append(';') }
             append('|'); paid.ads.forEach { append(it.id); append(';') }

@@ -5,6 +5,8 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
 import kotlinx.serialization.json.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 // This is the *actual* payload of api/events/index.php (not invented local demo data).
 data class AgendaScheduleEntry(val date: String, val time: String, val title: String, val artist: String, val location: String)
@@ -15,7 +17,8 @@ data class AgendaEventSummary(
     val organizers: List<String> = emptyList(), val styles: List<String> = emptyList(),
     val endDate: String = "", val ticketAvailable: Boolean = false, val ticketUrl: String = "",
     val price: String = "", val schedule: List<AgendaScheduleEntry> = emptyList(),
-    val language: String = "", val updatedAt: String = "", val eventStructure: String = ""
+    val language: String = "", val updatedAt: String = "", val eventStructure: String = "",
+    val savedCount: Int = 0
 ) {
     val key get() = "${id}_${date}"
     val isFestival get() = schedule.isNotEmpty() || (endDate.isNotBlank() && endDate != date) || eventStructure == "FESTIVAL"
@@ -58,12 +61,17 @@ object IosEventCatalog {
     private var saved: List<AgendaEventSummary> = emptyList()
     private var savedAtMs: Long = 0L
     private var restored = false
+    private var previewOnly = false
 
     fun cached(): List<AgendaEventSummary> {
         if (!restored) {
             restored = true
-            val raw = platformReadPublicCache("events_json")
+            // A 50-event preview is enough to draw the first 5/20 cards immediately.
+            // Full JSON is still retained and decoded off-main by get(), never discarded.
+            val preview = platformReadPublicCache("events_preview_json")
+            val raw = preview.ifBlank { platformReadPublicCache("events_json") }
             saved = runCatching { decode(raw) }.getOrDefault(emptyList())
+            previewOnly = preview.isNotBlank() && saved.isNotEmpty()
             savedAtMs = platformReadPublicCache("events_at").toLongOrNull() ?: 0L
         }
         return saved
@@ -71,13 +79,37 @@ object IosEventCatalog {
     fun cacheAgeMs(): Long = (currentEpochMillis() - savedAtMs).coerceAtLeast(0L)
     suspend fun get(force: Boolean = false): List<AgendaEventSummary> {
         val existing = cached()
-        if (!force && existing.isNotEmpty() && cacheAgeMs() < CACHE_MS) return existing
+        if (!force && existing.isNotEmpty() && cacheAgeMs() < CACHE_MS) {
+            if (previewOnly) {
+                val full = withContext(Dispatchers.Default) {
+                    runCatching { decode(platformReadPublicCache("events_json")) }.getOrNull()
+                }
+                if (!full.isNullOrEmpty()) {
+                    saved = full
+                    previewOnly = false
+                    return full
+                }
+                // A damaged full cache must not pin a partial catalog until the TTL expires.
+            } else return existing
+        }
         val response = client.get(ENDPOINT).bodyAsText()
-        val parsed = decode(response)
+        val root = withContext(Dispatchers.Default) {
+            Json.parseToJsonElement(response) as? JsonObject ?: error("Resposta del catàleg invàlida")
+        }
+        require(root.bool("ok")) { "El servidor no ha retornat ok=true" }
+        val objects = root.items("events")
+        val parsed = withContext(Dispatchers.Default) { decodeObjects(objects) }
         require(parsed.isNotEmpty()) { "El servidor no ha retornat esdeveniments vàlids." }
         saved = parsed
+        previewOnly = false
         savedAtMs = currentEpochMillis()
         platformWritePublicCache("events_json", response)
+        // Precompute this during refresh, not during the next UI startup.
+        val previewJson = JsonObject(mapOf(
+            "ok" to JsonPrimitive(true),
+            "events" to JsonArray(objects.take(50))
+        ))
+        platformWritePublicCache("events_preview_json", previewJson.toString())
         platformWritePublicCache("events_at", savedAtMs.toString())
         return parsed
     }
@@ -103,6 +135,7 @@ object IosEventCatalog {
                 ticketUrl = obj.text("ticket_url"), price = obj.text("ticket_price", "price"),
                 language = obj.text("language"), updatedAt = obj.text("updated_at"),
                 eventStructure = obj.text("event_structure").uppercase(),
+                savedCount = obj.text("saved_count").toIntOrNull()?.coerceAtLeast(0) ?: 0,
                 schedule = obj.items("schedule").map { s ->
                     AgendaScheduleEntry(s.text("date", "schedule_date", "start_at").take(10),
                         s.text("start_time", "time").ifBlank { s.text("start_at").drop(11).take(5) }.take(5),

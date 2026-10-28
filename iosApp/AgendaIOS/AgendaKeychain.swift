@@ -35,6 +35,7 @@ final class AgendaKeychain: NSObject, IosSessionBridge {
         q[kSecValueData as String] = data
         q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         _ = SecItemAdd(q as CFDictionary, nil)
+        syncDeviceTokenIfAuthenticated()
         // If Keychain rejects the write, the current session still works in memory.
         // The next launch will ask for login again; credentials never fall back to UserDefaults.
     }
@@ -110,6 +111,90 @@ final class AgendaKeychain: NSObject, IosSessionBridge {
             }
         }
     }
+    /** An APNs token is not a login credential. It is attached only to the current authenticated account. */
+    private var pushOpenListener: IosPushOpenCallback?
+    func setPushOpenListener(listener: IosPushOpenCallback) {
+        pushOpenListener = listener
+        if let pending = readCache(key: "push_open_artist"), !pending.isEmpty {
+            writeCache(key: "push_open_artist", value: "")
+            DispatchQueue.main.async { listener.onOpenArtist(artist: pending) }
+        }
+    }
+    func didTapArtistNotification(_ artist: String) {
+        guard !artist.isEmpty else { return }
+        writeCache(key: "push_open_artist", value: artist)
+        DispatchQueue.main.async {
+            self.pushOpenListener?.onOpenArtist(artist: artist)
+            if self.pushOpenListener != nil { self.writeCache(key: "push_open_artist", value: "") }
+        }
+    }
+
+    func requestRemoteNotifications(callback: IosReminderSchedulingCallback) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { allowed, error in
+            if allowed && error == nil {
+                DispatchQueue.main.async { UIApplication.shared.registerForRemoteNotifications() }
+            }
+            callback.onResult(success: allowed && error == nil,
+                              message: allowed ? "Permís concedit; registrant dispositiu" : "Permís no concedit")
+        }
+    }
+
+    func ensureRemoteRegistrationIfPermitted() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            if [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus) {
+                DispatchQueue.main.async { UIApplication.shared.registerForRemoteNotifications() }
+            }
+        }
+    }
+
+    func didReceiveAPNsDeviceToken(_ data: Data) {
+        let token = data.map { String(format: "%02x", $0) }.joined()
+        writeCache(key: "apns_device_token", value: token)
+        syncDeviceTokenIfAuthenticated()
+    }
+
+    func syncDeviceTokenIfAuthenticated() {
+        guard let bearer = loadToken(),
+              let token = readCache(key: "apns_device_token"), token.count >= 64,
+              let url = URL(string: "https://quimerafest.com/app/api/notifications/apns-device.php") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        #if DEBUG
+        let environment = "development"
+        #else
+        let environment = "production"
+        #endif
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "action": "register", "device_token": token, "environment": environment
+        ])
+        URLSession.shared.dataTask(with: request) { _, _, _ in
+            // Best effort; retry on next app launch/login. No token or authorization header is logged.
+        }.resume()
+    }
+
+    func shareText(text: String) {
+        guard !text.isEmpty else { return }
+        DispatchQueue.main.async {
+            guard let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene }).first(where: { $0.activationState == .foregroundActive }),
+                let window = scene.windows.first(where: { $0.isKeyWindow }),
+                let controller = window.rootViewController else { return }
+            var presenter = controller
+            while let presented = presenter.presentedViewController { presenter = presented }
+            let sheet = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+            if let pop = sheet.popoverPresentationController {
+                pop.sourceView = presenter.view
+                pop.sourceRect = CGRect(x: presenter.view.bounds.midX,
+                                        y: presenter.view.bounds.midY, width: 1, height: 1)
+            }
+            presenter.present(sheet, animated: true)
+        }
+    }
+
     func showTicketQr(code: String, title: String) {
         guard !code.isEmpty else { return }
         DispatchQueue.main.async {

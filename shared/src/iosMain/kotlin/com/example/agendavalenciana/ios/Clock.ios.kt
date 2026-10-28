@@ -2,13 +2,14 @@ package com.example.agendavalenciana.ios
 
 import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
+import platform.Foundation.NSTimeZone
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
-// Kotlin stdlib Clock evita els membres NSDate no resolts pel compilador Kotlin/Native.
-actual fun currentEpochMillis(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
+actual fun currentEpochMillis(): Long = (NSDate().timeIntervalSince1970 * 1000.0).toLong()
 actual fun currentLocalDateIso(): String = NSDateFormatter().apply {
     dateFormat = "yyyy-MM-dd"
+    timeZone = NSTimeZone.timeZoneWithName("Europe/Madrid")
 }.stringFromDate(NSDate())
 
 actual fun platformReadPublicCache(key: String): String =

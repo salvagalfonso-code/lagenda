@@ -5,12 +5,14 @@
     objectVersion = 56;
     objects = {
 /* Begin PBXBuildFile section */
+        6EFDA01470BA4A11B011A2CB /* AgendaProfileNative.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D94C772B9A5D4A1B004D22E; };
         111111111111111111111111 /* AgendaKeychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 222222222222222222222222; };
         2473A34F29E61C84EFE53BBE /* AgendaIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52B8A1241FE49E9706F88C59; };
         89F7814408E0FDF9C9216506 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC11C930786AD10DB119E884; };
         B9600CAE3852D9ECD03B826B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2917711376CF0B61C0F0D4CC; };
 /* End PBXBuildFile section */
 /* Begin PBXFileReference section */
+        4D94C772B9A5D4A1B004D22E /* AgendaProfileNative.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgendaProfileNative.swift; sourceTree = "<group>"; };
         222222222222222222222222 /* AgendaKeychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgendaKeychain.swift; sourceTree = "<group>"; };
         52B8A1241FE49E9706F88C59 /* AgendaIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgendaIOSApp.swift; sourceTree = "<group>"; };
         FC11C930786AD10DB119E884 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -23,7 +25,7 @@
 /* End PBXFrameworksBuildPhase section */
 /* Begin PBXGroup section */
         3C9D7F1ECE6B1C2C05B9A223 = {isa = PBXGroup; children = (FDBDEEC77EA1DB023A30F615, 5ADE8A4128725EB9150C196B); sourceTree = "<group>"; };
-        FDBDEEC77EA1DB023A30F615 /* AgendaIOS */ = {isa = PBXGroup; children = (52B8A1241FE49E9706F88C59, FC11C930786AD10DB119E884, 222222222222222222222222, 171CDF53BB5AB93E917A25DA, 2917711376CF0B61C0F0D4CC); path = AgendaIOS; sourceTree = "<group>"; };
+        FDBDEEC77EA1DB023A30F615 /* AgendaIOS */ = {isa = PBXGroup; children = (52B8A1241FE49E9706F88C59, FC11C930786AD10DB119E884, 222222222222222222222222, 4D94C772B9A5D4A1B004D22E, 171CDF53BB5AB93E917A25DA, 2917711376CF0B61C0F0D4CC); path = AgendaIOS; sourceTree = "<group>"; };
         5ADE8A4128725EB9150C196B /* Products */ = {isa = PBXGroup; children = (964BD5656C7A016EF0C9ADA7); name = Products; sourceTree = "<group>"; };
 /* End PBXGroup section */
 /* Begin PBXNativeTarget section */
@@ -39,13 +41,13 @@
         7C02C536E006A8F63E1ECD04 /* Compile Kotlin framework */ = {isa = PBXShellScriptBuildPhase; alwaysOutOfDate = 1; buildActionMask = 2147483647; files = (); inputPaths = (); name = "Compile Kotlin framework"; outputPaths = (); runOnlyForDeploymentPostprocessing = 0; shellPath = /bin/sh; shellScript = "if [ \"YES\" = \"$OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED\" ]; then exit 0; fi\ncd \"$SRCROOT/..\"\nsh ./gradlew :shared:embedAndSignAppleFrameworkForXcode\n"; };
 /* End PBXShellScriptBuildPhase section */
 /* Begin PBXSourcesBuildPhase section */
-        CD691BBBE993DA89463DFB43 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (2473A34F29E61C84EFE53BBE, 89F7814408E0FDF9C9216506, 111111111111111111111111); runOnlyForDeploymentPostprocessing = 0; };
+        CD691BBBE993DA89463DFB43 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (2473A34F29E61C84EFE53BBE, 89F7814408E0FDF9C9216506, 111111111111111111111111, 6EFDA01470BA4A11B011A2CB); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 /* Begin XCBuildConfiguration section */
         DA925284BA893A0B7CD58824 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; }; name = Debug; };
         DE0782D262A66EE774C897C3 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; SWIFT_COMPILATION_MODE = wholemodule; }; name = Release; };
-        7371A6B6FA3DC61535FF98BB /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; ENABLE_USER_SCRIPT_SANDBOXING = NO; FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"); GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = AgendaIOS/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks"); PRODUCT_BUNDLE_IDENTIFIER = com.agendavalenciana.app.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.9; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
-        5D7977E946686638EB4B0BD7 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; ENABLE_USER_SCRIPT_SANDBOXING = NO; FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"); GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = AgendaIOS/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks"); PRODUCT_BUNDLE_IDENTIFIER = com.agendavalenciana.app.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.9; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
+        7371A6B6FA3DC61535FF98BB /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_ENTITLEMENTS = AgendaIOS/AgendaIOS.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; ENABLE_USER_SCRIPT_SANDBOXING = NO; FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"); GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = AgendaIOS/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks"); PRODUCT_BUNDLE_IDENTIFIER = com.agendavalenciana.app.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.9; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Debug; };
+        5D7977E946686638EB4B0BD7 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_ENTITLEMENTS = AgendaIOS/AgendaIOS.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = ""; ENABLE_USER_SCRIPT_SANDBOXING = NO; FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"); GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = AgendaIOS/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 16.0; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks"); PRODUCT_BUNDLE_IDENTIFIER = com.agendavalenciana.app.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.9; TARGETED_DEVICE_FAMILY = "1,2"; }; name = Release; };
 /* End XCBuildConfiguration section */
 /* Begin XCConfigurationList section */
         073EE3C95B1DF6B8AE64AEA2 /* Build configuration list for PBXProject */ = {isa = XCConfigurationList; buildConfigurations = (DA925284BA893A0B7CD58824, DE0782D262A66EE774C897C3); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };

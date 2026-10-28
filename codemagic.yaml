@@ -1,64 +1,39 @@
 workflows:
-  lagenda-ios-projecte-complet:
-    name: "L'Agenda - iPhone ARM64 (corregit)"
+  ios_simulator:
+    name: LAgenda iOS Simulator (ARM64)
     instance_type: mac_mini_m2
     max_build_duration: 120
     environment:
-      xcode: latest
-      java: 17
-
+      vars:
+        JAVA_TOOL_OPTIONS: "-Xmx4g"
     scripts:
-      - name: "1 - Comprovar estructura iOS i Kotlin"
+      - name: Compilar iOS Simulator amb Xcode
         script: |
+          #!/usr/bin/env bash
           set -euo pipefail
-          cd "$CM_BUILD_DIR"
-          echo "=== LAGENDA PROJECTE COMPLET ==="
-          echo "Repositorio: $CM_BUILD_DIR"
-          test -f iosApp/AgendaIOS.xcodeproj/project.pbxproj || {
-            echo "ERROR: Falta iosApp/AgendaIOS.xcodeproj/project.pbxproj al repositori"
-            exit 1
-          }
-          test -f iosApp/AgendaIOS.xcodeproj/xcshareddata/xcschemes/AgendaIOS.xcscheme || {
-            echo "ERROR: Falta iosApp/AgendaIOS.xcodeproj/xcshareddata/xcschemes/AgendaIOS.xcscheme"
-            exit 1
-          }
-          test -f gradlew || { echo "ERROR: Falta gradlew a l'arrel"; exit 1; }
-          test -d shared || { echo "ERROR: Falta la carpeta shared a l'arrel"; exit 1; }
-          test -f settings.gradle.kts || { echo "ERROR: Falta settings.gradle.kts a l'arrel"; exit 1; }
-          chmod +x gradlew
-          if grep -Eq "^[[:space:]]*iosX64\(" shared/build.gradle.kts; then
-            echo "ERROR: iosX64() encara esta activat i Compose 1.12.2 no el suporta"
-            exit 1
-          fi
-          xcodebuild -list -project iosApp/AgendaIOS.xcodeproj
-          echo "OK: projecte i esquema a la ruta correcta"
-
-      - name: "2 - Compilar AgendaIOS per a simulador ARM64"
-        script: |
-          set -euo pipefail
-          cd "$CM_BUILD_DIR"
           mkdir -p "$CM_BUILD_DIR/artifacts"
+          if [ -d "$CM_BUILD_DIR/ANDROID_STUDIO/iosApp/AgendaIOS.xcodeproj" ]; then
+            cd "$CM_BUILD_DIR/ANDROID_STUDIO"
+          else
+            cd "$CM_BUILD_DIR"
+          fi
+          test -d iosApp/AgendaIOS.xcodeproj
+          test -f shared/build.gradle.kts
+          test -f gradlew
           xcodebuild build \
             -project iosApp/AgendaIOS.xcodeproj \
             -scheme AgendaIOS \
             -configuration Debug \
             -sdk iphonesimulator \
-            -arch arm64 \
+            -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             2>&1 | tee "$CM_BUILD_DIR/artifacts/xcodebuild.log"
-
-      - name: "3 - Generar ZIP per a Appetize"
-        script: |
-          set -euo pipefail
           APP="$CM_BUILD_DIR/DerivedData/Build/Products/Debug-iphonesimulator/AgendaIOS.app"
-          test -d "$APP" || { echo "ERROR: No s'ha generat AgendaIOS.app"; exit 1; }
-          mkdir -p "$CM_BUILD_DIR/artifacts"
-          ditto -c -k --keepParent "$APP" "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
-          test -s "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
-          echo "OK: artifacts/lagenda-ios-simulator.zip generat"
-
+          test -d "$APP"
+          cd "$(dirname "$APP")"
+          ditto -c -k --keepParent AgendaIOS.app "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
     artifacts:
-      - artifacts/lagenda-ios-simulator.zip
-      - artifacts/xcodebuild.log
+      - artifacts/*.zip
+      - artifacts/*.log

@@ -9,7 +9,7 @@ data class IosGeoPlace(val name: String, val comarca: String, val territory: Str
                        val latitude: Double, val longitude: Double, val municipality: Boolean)
 
 object IosGeoPlaces {
-    private fun norm(raw: String): String = raw.trim().lowercase()
+    private fun norm(raw: String): String = IosAdvancedSearch.norm(raw)
         .replace('à','a').replace('á','a').replace('â','a').replace('ä','a')
         .replace('è','e').replace('é','e').replace('ê','e').replace('ë','e')
         .replace('í','i').replace('ï','i').replace('ì','i')
@@ -6051,6 +6051,7 @@ Zona Industrial|Zona Industrial||Marina Baixa|PV|38.519684|-0.208194|0
         }
         index to byRegion
     }
+    fun allTowns(): List<String> = resolved.first.values.asSequence().filter { it.municipality }.map { it.name }.distinct().sorted().toList()
     fun allComarques(): List<String> = resolved.second.values.mapNotNull { it.firstOrNull()?.comarca }.distinct().sorted()
     fun searchTowns(query: String, limit: Int = 25): List<String> {
         val term = norm(query)

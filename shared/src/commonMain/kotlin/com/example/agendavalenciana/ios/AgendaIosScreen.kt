@@ -2,6 +2,8 @@ package com.example.agendavalenciana.ios
 
 import com.example.agendavalenciana.model.BatecCandidate
 import com.example.agendavalenciana.model.FollowedBatecsPolicy
+import com.example.agendavalenciana.model.IosBatecArtistGroup
+import com.example.agendavalenciana.model.IosBatecArtistGroups
 import com.example.agendavalenciana.model.GlobalAdPlacementPolicy
 import com.example.agendavalenciana.model.IosAccountCachePolicy
 import com.example.agendavalenciana.model.IosFeedExclusionPolicy
@@ -28,6 +30,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -36,6 +40,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil3.compose.AsyncImage
 import io.ktor.http.encodeURLParameter
 import kotlinx.coroutines.launch
@@ -71,17 +76,43 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var feedMode by remember { mutableStateOf("Per a tu") }
     var query by remember { mutableStateOf("") }
     var appliedQuery by remember { mutableStateOf("") }
-    LaunchedEffect(query) { kotlinx.coroutines.delay(220); appliedQuery = query.trim() }
+    // Query is committed only by Search / tapping a suggestion. Typing never recalculates the feed.
+    var suggestionDraft by remember { mutableStateOf("") }
+    LaunchedEffect(query) { kotlinx.coroutines.delay(240); suggestionDraft = query.trim() }
+    var chosenSuggestion by remember { mutableStateOf<IosSearchSuggestion?>(null) }
+    var appliedSuggestion by remember { mutableStateOf<IosSearchSuggestion?>(null) }
     var limit by remember { mutableIntStateOf(5) }
     var selected by remember { mutableStateOf<AgendaEventSummary?>(null) }
     var artist by remember { mutableStateOf<String?>(null) }
     var artistSourceEvent by remember { mutableStateOf<AgendaEventSummary?>(null) }
+    LaunchedEffect(sessionBridge) {
+        sessionBridge?.setPushOpenListener(object : IosPushOpenCallback {
+            override fun onOpenArtist(artistName: String) {
+                if (artistName.isNotBlank()) {
+                    tab = "Inici"
+                    artistSourceEvent = null
+                    artist = artistName
+                }
+            }
+        })
+    }
     var festivalMatchedArtist by remember { mutableStateOf("") }
-    var savedMode by remember { mutableStateOf("Guardats") }
+    var savedFestivalRevision by remember { mutableIntStateOf(0) }
     var batecStoryKey by remember { mutableStateOf<String?>(null) }
+    var batecsReturnEpoch by remember { mutableIntStateOf(0) }
+    fun closeBatecs() {
+        batecStoryKey = null
+        batecsReturnEpoch += 1
+    }
     var searchFiltersOpen by remember { mutableStateOf(false) }
     var searchTown by remember { mutableStateOf("") }
     var searchCategory by remember { mutableStateOf("") }
+    var searchComarca by remember { mutableStateOf("") }
+    var searchStyle by remember { mutableStateOf("") }
+    var searchRadius by remember { mutableIntStateOf(0) }
+    var searchFromDate by remember { mutableStateOf("") }
+    var searchToDate by remember { mutableStateOf("") }
+    var appliedSearchFilters by remember { mutableStateOf(IosSearchFilters()) }
     var searchPresets by remember { mutableStateOf(emptyList<IosSavedSearch>()) }
     var newSearchName by remember { mutableStateOf("") }
     var loginOpen by remember { mutableStateOf(false) }
@@ -133,8 +164,14 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var savedLists by remember { mutableStateOf(emptyList<IosSavedList>()) }
     var profileSettings by remember { mutableStateOf<IosProfileSettings?>(null) }
     var profileSettingsOpen by remember { mutableStateOf(false) }
+    var myProfile by remember { mutableStateOf<IosMyProfile?>(null) }
+    var editProfileOpen by remember { mutableStateOf(false) }
+    var deleteAccountOpen by remember { mutableStateOf(false) }
     var reportEvent by remember { mutableStateOf<AgendaEventSummary?>(null) }
     var pendingFollows by remember { mutableStateOf(emptySet<String>()) }
+    var artistBells by remember { mutableStateOf(emptyMap<String, IosArtistBell>()) }
+    var artistBellEditing by remember { mutableStateOf<String?>(null) }
+
 
     fun work(action: suspend () -> Unit) {
         scope.launch {
@@ -150,7 +187,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 paid = runCatching { api.promoted() }.getOrDefault(paid)
                 entityStyles = withContext(Dispatchers.Default) { IosEntityAffinityCatalog.refresh(api, force) }
                 if (account != null) user = runCatching { api.userState() }.getOrDefault(user)
-                batecs = runCatching { api.batecs() }.getOrDefault(batecs)
+                batecs = runCatching { api.batecs(user.follows.filter { it.type.equals("ARTIST", true) }
+                    .map { it.label }.toSet()) }.getOrDefault(batecs)
                 if (force) status = "Agenda actualitzada"
             } finally { updating = false }
         }
@@ -182,17 +220,25 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 val seenRequest = async { runCatching { api.seenBatecs() }.getOrNull() }
                 val listsRequest = async { runCatching { api.savedLists() }.getOrNull() }
                 val presetsRequest = async { runCatching { api.savedSearches() }.getOrNull() }
+                val bellsRequest = async { runCatching { api.artistBells() }.getOrNull() }
                 val newUser = userRequest.await()
+                // A session may be restored after the public catalog was loaded.
+                // Re-fetch the followed Batecs without clearing the existing strip on failure.
+                val newBatecs = runCatching { api.batecs(newUser.follows
+                    .filter { it.type.equals("ARTIST", true) }.map { it.label }.toSet()) }.getOrNull()
                 val newNotices = noticesRequest.await()
                 val newTickets = ticketsRequest.await()
                 val newGroups = groupsRequest.await()
                 val newSeen = seenRequest.await()
                 val newSavedLists = listsRequest.await()
                 val newPresets = presetsRequest.await()
+                val newBells = bellsRequest.await()
                 // Never replace the new account's state with an old account's response.
                 if (account?.id == expectedAccount) {
                     user = newUser
+                    newBatecs?.let { batecs = it }
                     newNotices?.let { notices = it }
+                    newBells?.let { artistBells = it.filter { b -> b.enabled }.associateBy { b -> IosArtistBellPolicy.key(b.artistName) } }
                     newTickets?.let { tickets = it }
                     newGroups?.let { groups = it }
                     newSeen?.let { seenBatecs = it }
@@ -205,7 +251,10 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     LaunchedEffect(Unit) {
         refresh(false)
         val restored = api.restoreAccount()
-        if (restored != null) { account = restored; useAccountPreferences(restored.id); loadAccountPages() }
+        if (restored != null) {
+            account = restored; useAccountPreferences(restored.id); loadAccountPages()
+            myProfile = runCatching { api.myPublicProfile() }.getOrNull()
+        }
     }
     // Campaigns expire or begin independently of the 30-minute personal feed cache.
     // Refresh only paid inventory, quietly while Inici is open; never display a spinner.
@@ -237,22 +286,41 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             }
         }
     }
-    val followedStories = remember(batecs, user.follows) {
-        val followedStoryKeys = FollowedBatecsPolicy.firstSix(
+    // The Android carousel contains ONE circle per followed artist. Multiple server
+    // publications share that circle; viewed status is grey only when ALL are seen.
+    val followedGroups = remember(batecs, user.follows, seenBatecs) {
+        IosBatecArtistGroups.select(
             batecs.map { BatecCandidate(it.storyKey, it.artist) },
-            user.follows.filter { it.type.equals("ARTIST", true) }.map { it.label }.toSet()
+            user.follows.filter { it.type.equals("ARTIST", true) }.map { it.label }.toSet(),
+            seenBatecs
         )
-        val byKey = batecs.associateBy { it.storyKey }
-        followedStoryKeys.mapNotNull(byKey::get)
     }
-    // Search filters affect only the requested results. The feed snapshot itself is untouched.
-    val filtered = remember(available, appliedQuery, searchTown, searchCategory) {
-        available.filter { ev ->
-            ev.matches(appliedQuery) &&
-                (searchTown.isBlank() || ev.town.contains(searchTown.trim(), ignoreCase = true)) &&
-                (searchCategory.isBlank() || ev.category.contains(searchCategory.trim(), ignoreCase = true))
+    val batecRowState = rememberLazyListState()
+    LaunchedEffect(batecsReturnEpoch) {
+        if (batecsReturnEpoch > 0) batecRowState.scrollToItem(0)
+    }
+    // Build the suggestion index off the UI thread only when the catalog changes.
+    val searchPool by produceState<List<IosSearchSuggestion>>(initialValue = emptyList(), available) {
+        value = withContext(Dispatchers.Default) {
+            IosAdvancedSearch.pool(available, IosGeoPlaces.allTowns(), IosGeoPlaces.allComarques())
         }
     }
+    val suggestions by produceState<List<IosSearchSuggestion>>(initialValue = emptyList(), suggestionDraft, searchPool, chosenSuggestion) {
+        value = withContext(Dispatchers.Default) {
+            if (chosenSuggestion != null) emptyList() else IosAdvancedSearch.suggest(searchPool, suggestionDraft)
+        }
+    }
+    val categoriesForSearch = remember(available) { available.map { it.category }.filter(String::isNotBlank).distinct().sorted() }
+    val stylesForSearch = remember(available) { available.flatMap { it.styles.flatMap { s -> s.split('|',',',';') } }.map(String::trim).filter(String::isNotBlank).distinct().sorted() }
+    val searchInProgress = appliedQuery.isNotBlank() || appliedSearchFilters.isActive
+    // Strict global search: never restrict results to the previous personalized snapshot.
+    val computedFiltered by produceState<List<AgendaEventSummary>>(initialValue = emptyList(), available, appliedQuery, appliedSuggestion, appliedSearchFilters) {
+        value = withContext(Dispatchers.Default) {
+            available.filter { IosAdvancedSearch.matches(it, appliedQuery, appliedSuggestion, appliedSearchFilters) }
+        }
+    }
+    // Unfiltered renders the catalog immediately, without waiting for an unnecessary re-filter.
+    val filtered = if (searchInProgress) computedFiltered else available
     // The potentially costly affinity calculation never runs in the Compose render pass.
     // Only follows (not saved/alerts) and explicit tastes invalidate it; typing does not.
     // Keep the last valid selection visible during an update, but never show another account's.
@@ -271,14 +339,20 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     }
     val forYou = if (selectedForYou.first == account?.id) selectedForYou.second else emptyList()
     // Commercially guaranteed events retain priority even during searching. No duplicate cards.
-    val activeFeed = remember(forYou, filtered, available, paid, feedMode, appliedQuery, searchTown, searchCategory,valencianFirst) {
+    val activeFeed = remember(forYou, filtered, available, paid, feedMode, searchInProgress, valencianFirst, today) {
         // All active commercial placements and internal ticket sales remain visible,
         // even when the user enters a search; avoid duplicates by event occurrence.
         val commercialIds = paid.guaranteedEventIds + paid.ads.map { it.eventId }
         val guaranteed = available.filter { it.id in commercialIds || it.ticketAvailable }
-        val selectedKeys = filtered.mapTo(HashSet(filtered.size)) { it.key }
-        val organic = if (feedMode == "Sense filtre") filtered else forYou.filter { it.key in selectedKeys }
-        (guaranteed + organic).distinctBy { it.key }
+        val organic = if (searchInProgress || feedMode == "Sense filtre") filtered else forYou
+        if (!searchInProgress && feedMode == "Sense filtre") {
+            // Use the shared full catalog without first concatenating paid subsets (no duplicates).
+            // An ongoing festival is dated by its next relevant day, without mutating its original ID.
+            available.sortedWith(compareBy<AgendaEventSummary> {
+                IosUnfilteredFeedPolicy.relevantDate(it.date, it.endDate, today,
+                    if (it.isFestival) it.schedule.map { slot -> slot.date } else emptyList())
+            }.thenBy { it.time }.thenBy { it.id })
+        } else (guaranteed + organic).distinctBy { it.key }
             .sortedWith(compareBy<AgendaEventSummary> { it.date.ifBlank { "9999" } }
                 .thenByDescending { feedMode == "Per a tu" && valencianFirst &&
                     (IosGeoPlaces.key(it.language).contains("valencia") ||
@@ -302,7 +376,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         // never forces a new feed calculation while navigating the current one.
         IosRecentInterest.recordOpen(account?.id,event)
         selected = event
-        festivalMatchedArtist = if (event.isFestival) q else ""
+        festivalMatchedArtist = if (event.isFestival && appliedSuggestion?.type == IosSearchType.ARTIST) appliedSuggestion?.value.orEmpty() else if (event.isFestival) q else ""
     }
     fun excludeFromFeed(event: AgendaEventSummary, mode: String) {
         when (mode) {
@@ -410,16 +484,22 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
 
     MaterialTheme(colorScheme = lightColorScheme(primary = Ink, background = Color.White)) {
         Column(Modifier.fillMaxSize().background(Color.White)) {
-            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 10.dp, bottom = 7.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                TextButton(onClick = { tab = "Perfil" }) { Text("♙", fontSize = 25.sp) }
-                Text("l’Agenda", fontSize = 31.sp, fontWeight = FontWeight.Black, color = Ink)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { prefOpen = true }) { Text("☷", fontSize = 25.sp) }
-                    TextButton(onClick = { notificationsOpen = true; if (account != null) loadAccountPages() }) {
-                        Text("♧${if (notices.any { !it.read }) "•" else ""}", fontSize = 24.sp)
-                    }
+            // Android parity: same horizontal logo and controls, stable symmetric layout.
+            Row(Modifier.fillMaxWidth().height(82.dp).padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                AgendaTopAction("person", onClick = { tab = "Perfil" })
+                AgendaTopAction("plus", color = AgendaGold, onClick = {
+                    // Android's add button opens the account/organizer area.
+                    tab = "Perfil"
+                })
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    AgendaBrandLogo(Modifier.fillMaxWidth().widthIn(max = 175.dp).height(58.dp))
                 }
+                AgendaTopAction("sliders", onClick = { prefOpen = true })
+                AgendaTopAction("bell", onClick = {
+                    notificationsOpen = true
+                    if (account != null) loadAccountPages()
+                }, badge = notices.count { !it.read })
             }
             if (error.isNotBlank()) {
                 Surface(color = Color(0xFFFFEFEF), modifier = Modifier.fillMaxWidth()) {
@@ -437,98 +517,239 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 when (tab) {
                     "Inici" -> {
                         Column(Modifier.fillMaxSize()) {
-                            Text("Descobrix la cultura", modifier = Modifier.padding(start = 18.dp, top = 8.dp, bottom = 8.dp),
-                                fontSize = 23.sp, fontWeight = FontWeight.Bold)
-                            Row(Modifier.padding(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf("Per a tu", "Sense filtre").forEach { mode ->
-                                    FilterChip(selected = feedMode == mode, onClick = { feedMode = mode; limit = 5 }, label = { Text(mode) })
+                            // Search comes FIRST (as on Android), before header ad and batecs.
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Row(Modifier.weight(1f).height(52.dp)
+                                    .border(1.dp, Color(0xFFE1E1E1), RoundedCornerShape(15.dp))
+                                    .padding(start = 12.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    AgendaGlyph("search", Modifier.size(22.dp), AgendaGold)
+                                    OutlinedTextField(value = query, onValueChange = {
+                                        query = it; chosenSuggestion = null
+                                    }, singleLine = true,
+                                        placeholder = { Text("Grup, poble, empresa, comarca...", fontSize = 12.sp, maxLines = 1) },
+                                        modifier = Modifier.weight(1f),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            unfocusedBorderColor = Color.Transparent,
+                                            focusedBorderColor = Color.Transparent),
+                                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                        keyboardActions = KeyboardActions(onSearch = {
+                                            appliedQuery = query.trim(); appliedSuggestion = chosenSuggestion
+                                            limit = 5; IosRecentInterest.recordSearch(account?.id, appliedQuery, available)
+                                        }))
+                                }
+                                Row(Modifier.height(52.dp).background(Color(0xFFF2F2F2), RoundedCornerShape(14.dp))
+                                    .clickable { searchFiltersOpen = !searchFiltersOpen }
+                                    .padding(horizontal = 10.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    AgendaGlyph("sliders", Modifier.size(20.dp), AgendaGold)
+                                    Text("Opcions", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                                 }
                             }
-                            if (account != null && user.follows.any { it.type == "ARTIST" }) {
-                                if (followedStories.size == 6) {
-                                    Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 4.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                        followedStories.forEach { b ->
-                                            val viewed = b.storyKey in seenBatecs
-                                            Column(Modifier.width(73.dp).clickable {
-                                                // A Batec is a story, not an immediate event popup.
-                                                batecStoryKey = b.storyKey
-                                            }, horizontalAlignment = Alignment.CenterHorizontally) {
-                                                Box(Modifier.size(58.dp).background(if (viewed) Color(0xFFE0E0E0) else Accent, CircleShape).padding(2.dp)) {
-                                                    Poster(b.imageUrl.ifBlank { eventById[b.eventId]?.posterUrl.orEmpty() }, Modifier.fillMaxSize().clip(CircleShape))
-                                                }
-                                                Text(b.artist, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                                    color = if (viewed) Color.Gray else Ink)
+                            if (query.isNotBlank()) {
+                                TextButton(onClick = {
+                                    appliedQuery = query.trim(); appliedSuggestion = chosenSuggestion
+                                    limit = 5; IosRecentInterest.recordSearch(account?.id, appliedQuery, available)
+                                }, modifier = Modifier.align(Alignment.End)) { Text("Cercar") }
+                            }
+                            if (suggestions.isNotEmpty() && query.trim() == suggestionDraft && chosenSuggestion == null && tab == "Inici") {
+                                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                                    .heightIn(max = 216.dp).verticalScroll(rememberScrollState())) {
+                                    suggestions.forEach { suggestion ->
+                                        Row(Modifier.fillMaxWidth().clickable {
+                                            chosenSuggestion = suggestion
+                                            query = suggestion.value
+                                            appliedQuery = suggestion.value
+                                            appliedSuggestion = suggestion
+                                            suggestionDraft = ""
+                                            limit = 5
+                                            IosRecentInterest.recordSearch(account?.id, suggestion.value, available)
+                                        }.padding(vertical = 7.dp, horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            Text(when(suggestion.type) {
+                                                IosSearchType.ARTIST -> "♫"
+                                                IosSearchType.TOWN -> "⌖"
+                                                IosSearchType.COMARCA -> "▱"
+                                                IosSearchType.ORGANIZER -> "▦"
+                                                IosSearchType.VENUE -> "⌂"
+                                                IosSearchType.STYLE -> "#"
+                                                IosSearchType.CATEGORY -> "◇"
+                                                IosSearchType.EVENT -> "▤"
+                                            }, modifier = Modifier.width(28.dp))
+                                            Column {
+                                                Text(suggestion.value, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                                Text(suggestion.subtitle, color = Color.Gray, fontSize = 10.sp)
                                             }
                                         }
                                     }
                                 }
                             }
-                            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                OutlinedTextField(value = query, onValueChange = { query = it; limit = 5 },
-                                    singleLine = true, label = { Text("Buscar artistes, actes, pobles…") },
-                                    modifier = Modifier.weight(1f),
-                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                    keyboardActions = KeyboardActions(onSearch = {
-                                        appliedQuery = query.trim()
-                                        IosRecentInterest.recordSearch(account?.id, query, available)
-                                    }))
-                                TextButton(onClick = {
-                                    appliedQuery = query.trim()
-                                    IosRecentInterest.recordSearch(account?.id, query, available)
-                                }, enabled = query.trim().length >= 3) { Text("Cercar") }
+                            // Contractual HEADER creative before batecs, as Android. No duplicate in LazyColumn.
+                            SponsoredCarousel("Capçalera", paid.ads.filter { it.placement == "HEADER" },
+                                eventById, ::adViewed, ::adOpened, header = true)
+                            if (account != null && followedGroups.size >= 6) {
+                                LazyRow(
+                                    state = batecRowState,
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                                    contentPadding = PaddingValues(horizontal = 14.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(9.dp)
+                                ) {
+                                    items(followedGroups, key = { it.key }) { group ->
+                                        val cover = batecs.firstOrNull { it.storyKey == group.openingStoryKey }
+                                        Column(
+                                            Modifier.width(67.dp).clickable { batecStoryKey = group.key },
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Box(
+                                                Modifier.size(56.dp)
+                                                    .border(2.dp, if (group.allSeen) Color(0xFFAAAAAA) else Color(0xFF8F59AD), CircleShape)
+                                                    .padding(3.dp).clip(CircleShape)
+                                                    .background(if (group.allSeen) Color(0xFFE5E5E5) else Accent),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Poster(
+                                                    cover?.imageUrl.orEmpty().ifBlank {
+                                                        cover?.eventId?.let { eventById[it]?.posterUrl }.orEmpty()
+                                                    },
+                                                    Modifier.fillMaxSize().clip(CircleShape).alpha(if (group.allSeen) 0.43f else 1f)
+                                                )
+                                                if (group.storyKeys.size > 1) {
+                                                    Box(Modifier.align(Alignment.TopEnd).size(19.dp)
+                                                        .background(Color.White, CircleShape), contentAlignment = Alignment.Center) {
+                                                        Text(group.storyKeys.size.coerceAtMost(99).toString(),
+                                                            color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                }
+                                            }
+                                            Spacer(Modifier.height(4.dp))
+                                            Text(group.artist, fontSize = 10.sp, maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                color = if (group.allSeen) Color.Gray else Ink)
+                                        }
+                                    }
+                                }
                             }
-                            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                TextButton(onClick = { searchFiltersOpen = !searchFiltersOpen }) {
-                                    Text(if (searchFiltersOpen) "▴ Ocultar filtres" else "☷ Filtres de cerca")
+                            // Android feed tabs and total: modes do not displace the search box.
+                            Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 5.dp, bottom = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                var modeMenu by remember { mutableStateOf(false) }
+                                Box {
+                                    Surface(shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFF4F4F4),
+                                        modifier = Modifier.clickable { modeMenu = true }) {
+                                        Text("$feedMode ▾", modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                            fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                    }
+                                    DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
+                                        listOf("Per a tu", "Sense filtre").forEach { mode ->
+                                            DropdownMenuItem(text = { Text(mode) }, onClick = {
+                                                feedMode = mode; limit = 5; modeMenu = false
+                                            })
+                                        }
+                                    }
                                 }
-                                if (searchTown.isNotBlank() || searchCategory.isNotBlank()) {
-                                    TextButton(onClick = { searchTown = ""; searchCategory = ""; limit = 5 }) { Text("Netejar") }
-                                }
+                                Text("Seguits", modifier = Modifier.clickable {
+                                    feedMode = "Per a tu"; limit = 5
+                                }, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                Text("Categoria ▾", modifier = Modifier.clickable { searchFiltersOpen = true }, fontSize = 13.sp)
+                                Spacer(Modifier.weight(1f))
+                                Text("${personalizedFeed.size} esdev.", color = Color.Gray, fontSize = 11.sp)
+                            }
+                            if (searchInProgress || query.isNotBlank()) {
+                                TextButton(onClick = {
+                                    query = ""; appliedQuery = ""; chosenSuggestion = null; appliedSuggestion = null
+                                    searchTown = ""; searchComarca = ""; searchRadius = 0
+                                    searchCategory = ""; searchStyle = ""; searchFromDate = ""; searchToDate = ""
+                                    appliedSearchFilters = IosSearchFilters(); limit = 5
+                                }) { Text("Netejar cerca") }
                             }
                             if (searchFiltersOpen) {
-                                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedTextField(searchTown, { searchTown = it; limit = 5 },
-                                        label = { Text("On? Poble") }, singleLine = true, modifier = Modifier.weight(1f))
-                                    OutlinedTextField(searchCategory, { searchCategory = it; limit = 5 },
-                                        label = { Text("Categoria") }, singleLine = true, modifier = Modifier.weight(1f))
-                                }
-                                Text("Els filtres de cerca no amplien els resultats; els anuncis contractats conserven la seua prioritat.",
-                                    fontSize = 10.sp, color = Color.Gray, modifier = Modifier.padding(horizontal = 16.dp))
-                                if (account != null) {
-                                    val currentId = account?.id
-                                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        OutlinedTextField(newSearchName, { newSearchName = it.take(52) },
-                                            label = { Text("Nom de la cerca") }, modifier = Modifier.weight(1f), singleLine = true)
-                                        TextButton(enabled = searchTown.isNotBlank() && newSearchName.isNotBlank(), onClick = {
-                                            val name = newSearchName.trim(); val town = searchTown.trim()
-                                            work {
-                                                api.saveTownSearch(name, town)
-                                                if (account?.id == currentId) {
-                                                    searchPresets = api.savedSearches()
-                                                    newSearchName = ""; status = "Filtre de població guardat"
-                                                }
-                                            }
-                                        }) { Text("Guardar") }
+                                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    OutlinedTextField(searchTown, { searchTown = it; if (it.isBlank()) searchRadius = 0 },
+                                        label = { Text("On? Poble") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                                    if (searchTown.length >= 2) {
+                                        IosGeoPlaces.searchTowns(searchTown, 8).filterNot { it.equals(searchTown,true) }.forEach { town ->
+                                            TextButton(onClick = { searchTown = town }) { Text("⌖ $town") }
+                                        }
                                     }
-                                    searchPresets.forEach { preset ->
-                                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                                            verticalAlignment = Alignment.CenterVertically) {
-                                            TextButton(onClick = { searchTown = preset.town; limit = 5 },
-                                                modifier = Modifier.weight(1f)) { Text("${preset.name} · ${preset.town}", maxLines = 1) }
-                                            TextButton(onClick = { work {
-                                                api.removeSavedSearch(preset.name)
-                                                if (account?.id == currentId) searchPresets = api.savedSearches()
-                                            } }) { Text("✕") }
+                                    OutlinedTextField(searchComarca, { searchComarca = it },
+                                        label = { Text("Comarca") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                                    if (searchComarca.length >= 2) {
+                                        IosGeoPlaces.allComarques().asSequence().filter { IosAdvancedSearch.norm(it).contains(IosAdvancedSearch.norm(searchComarca)) }
+                                            .take(6).forEach { comarca ->
+                                                TextButton(onClick = { searchComarca = comarca }) { Text("▱ $comarca") }
+                                            }
+                                    }
+                                    Text("Radi des del poble (0 km = només el poble)", fontSize = 12.sp)
+                                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        listOf(0,5,15,30,50,100).forEach { radius ->
+                                            FilterChip(selected = searchRadius == radius, enabled = searchTown.isNotBlank() || radius == 0,
+                                                onClick = { searchRadius = radius }, label = { Text("$radius km") })
+                                        }
+                                    }
+                                    Text("Categoria", fontSize = 12.sp)
+                                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                        FilterChip(selected = searchCategory.isBlank(), onClick = { searchCategory = "" }, label = { Text("Totes") })
+                                        categoriesForSearch.forEach { category ->
+                                            FilterChip(selected = searchCategory == category,
+                                                onClick = { searchCategory = category }, label = { Text(category) })
+                                        }
+                                    }
+                                    OutlinedTextField(searchStyle, { searchStyle = it }, label = { Text("Estil / subcategoria") },
+                                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                                    if (searchStyle.length >= 2) stylesForSearch.asSequence().filter { it.contains(searchStyle,true) }
+                                        .take(6).forEach { style -> TextButton(onClick = { searchStyle = style }) { Text("# $style") } }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        OutlinedTextField(searchFromDate, { searchFromDate = it.take(10) },
+                                            label = { Text("Des de (AAAA-MM-DD)") }, singleLine = true, modifier = Modifier.weight(1f))
+                                        OutlinedTextField(searchToDate, { searchToDate = it.take(10) },
+                                            label = { Text("Fins a (AAAA-MM-DD)") }, singleLine = true, modifier = Modifier.weight(1f))
+                                    }
+                                    val draft = IosSearchFilters(searchTown.trim(), searchComarca.trim(), searchRadius,
+                                        searchCategory.trim(), searchStyle.trim(), searchFromDate.trim(), searchToDate.trim())
+                                    if (!draft.valid()) Text("Revisa les dates i el radi: cal seleccionar un poble per aplicar distància.", color = Color.Red, fontSize = 12.sp)
+                                    Button(onClick = { appliedSearchFilters = draft; appliedQuery = query.trim(); appliedSuggestion = chosenSuggestion; limit = 5 },
+                                        enabled = draft.valid()) { Text("Aplicar filtres") }
+                                    Text("Els filtres no amplien els resultats d'una cerca; la publicitat contractual conserva els seus espais.",
+                                        fontSize = 10.sp, color = Color.Gray)
+                                    if (account != null) {
+                                        val currentId = account?.id
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            OutlinedTextField(newSearchName, { newSearchName = it.take(52) },
+                                                label = { Text("Nom de la cerca") }, modifier = Modifier.weight(1f), singleLine = true)
+                                            TextButton(enabled = searchTown.isNotBlank() && newSearchName.isNotBlank(), onClick = {
+                                                val name = newSearchName.trim(); val town = searchTown.trim(); val category = searchCategory.trim()
+                                                work {
+                                                    api.saveTownSearch(name,town,if (category.isBlank()) emptyList() else listOf(category))
+                                                    if (account?.id == currentId) {
+                                                        searchPresets = api.savedSearches(); newSearchName = ""
+                                                        status = "Poble i categoria guardats; radi i dates no es sincronitzen"
+                                                    }
+                                                }
+                                            }) { Text("Guardar") }
+                                        }
+                                        searchPresets.forEach { preset ->
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                TextButton(onClick = {
+                                                    searchTown = preset.town
+                                                    searchCategory = preset.categories.firstOrNull().orEmpty()
+                                                    searchComarca = ""; searchRadius = 0; searchStyle = ""; searchFromDate = ""; searchToDate = ""
+                                                    appliedSearchFilters = IosSearchFilters(town = searchTown,category = searchCategory)
+                                                    limit = 5
+                                                }, modifier = Modifier.weight(1f)) {
+                                                    Text("${preset.name} · ${preset.town}", maxLines = 1)
+                                                }
+                                                TextButton(onClick = { work {
+                                                    api.removeSavedSearch(preset.name)
+                                                    if (account?.id == currentId) searchPresets = api.savedSearches()
+                                                } }) { Text("✕") }
+                                            }
                                         }
                                     }
                                 }
                             }
-                            Row(Modifier.fillMaxWidth().padding(horizontal = 15.dp), verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(if (updating && events.isEmpty()) "Carregant catàleg…" else "${personalizedFeed.size} activitats", fontSize = 12.sp, color = Color.DarkGray)
-                                TextButton(onClick = { refresh(true) }, enabled = !updating) { Text(if (updating) "Actualitzant…" else "↻ Actualitzar") }
+                            if (searchInProgress) {
+                                Text("Filtres actius · ${filtered.size} resultats orgànics", fontSize = 11.sp,
+                                    color = Color.DarkGray, modifier = Modifier.padding(horizontal = 16.dp))
                             }
                             if (feedMode == "Per a tu" && account == null && chosenCategories.isEmpty() && chosenTowns.isEmpty()) {
                                 Text("Inicia sessió i seguix artistes o tria preferències per personalitzar el feed.",
@@ -540,49 +761,44 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                             }
                             if (updating) LinearProgressIndicator(
                                 modifier = Modifier.fillMaxWidth().height(2.dp), color = Ink, trackColor = Accent)
-                            EventList(visibleFeed, personalizedFeed.size, onLoadMore = { limit = (limit + if (limit == 5) 15 else 10).coerceAtMost(personalizedFeed.size) },
+                            EventList(visibleFeed, personalizedFeed.size,
+                                onLoadMore = { limit = IosUnfilteredFeedPolicy.nextCount(limit, personalizedFeed.size) },
+                                today = today,
+                                scrollContext = "${feedMode}|${appliedQuery}|${appliedSearchFilters.hashCode()}|${account?.id}",
                                 savedIds = user.saved, onClick = { showEvent(it, appliedQuery) }, onSave = ::toggleSaved,
                                 ads = paid.ads, protectedIds = paid.guaranteedEventIds,
                                 commercialEvents = eventById,
                                 onAdViewed = ::adViewed, onAdOpened = ::adOpened,
                                 refreshing = updating, onRefresh = { refresh(true) },
+                                returnToStartEpoch = batecsReturnEpoch,
                                 onExclude = ::excludeFromFeed, onReport = { reportEvent = it })
                         }
                     }
                     "Guardats" -> {
-                        Column(Modifier.fillMaxSize()) {
-                            Text("Les meues agendes", fontSize = 26.sp, fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(start = 18.dp, top = 17.dp, bottom = 10.dp))
-                            Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                listOf("Guardats", "Recordatoris", "Llistes").forEach { item ->
-                                    FilterChip(selected = savedMode == item, onClick = { savedMode = item }, label = { Text(item) })
-                                }
+                        if (account == null) {
+                            Column(Modifier.fillMaxSize()) {
+                                PageTitle("Les meues agendes")
+                                LoginPrompt { loginOpen = true }
                             }
-                            val ids = if (savedMode == "Guardats") user.saved else user.alerts
-                            val results = remember(events, ids, today) {
-                                events.filter { it.id in ids && (it.endDate.ifBlank { it.date }.isBlank() || it.endDate.ifBlank { it.date } >= today) }
-                            }
-                            if (account == null) LoginPrompt { loginOpen = true }
-                            else if (savedMode == "Llistes") {
-                                val expectedAccountId = account?.id
-                                key(expectedAccountId) {
-                                    SavedListsPanel(
-                                        lists = savedLists, available = available, api = api, work = ::work,
-                                        onOpenEvent = { showEvent(it) },
-                                        onChanged = { incoming -> if (account?.id == expectedAccountId) savedLists = incoming },
-                                        onStatus = { status = it }
-                                    )
-                                }
-                            }
-                            else if (results.isEmpty()) EmptyState(if (savedMode == "Guardats") "Encara no tens guardats." else "No tens recordatoris actius.")
-                            else LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                items(results, key = { it.key }) { ev ->
-                                    EventCard(ev, ev.id in user.saved, onClick = { showEvent(ev) },
-                                        trailing = {
-                                            if (savedMode == "Recordatoris") TextButton(onClick = { alertToDisable = ev }) { Text("♧", fontSize = 23.sp) }
-                                            else TextButton(onClick = { toggleSaved(ev) }) { Text("▣", fontSize = 23.sp) }
-                                        })
-                                }
+                        } else {
+                            val expectedAccountId = account?.id ?: 0
+                            key(expectedAccountId) {
+                                IosSavedAgendaScreen(
+                                    accountId = expectedAccountId,
+                                    user = user,
+                                    lists = savedLists,
+                                    available = available,
+                                    today = today,
+                                    api = api,
+                                    work = ::work,
+                                    onListsChanged = { result -> if (account?.id == expectedAccountId) savedLists = result },
+                                    onStatus = { status = it },
+                                    onOpenEvent = { event, matchedArtist -> showEvent(event, matchedArtist) },
+                                    onToggleSaved = ::toggleSaved,
+                                    onDisableReminder = { alertToDisable = it },
+                                    reminderTime = { event -> platformReadPublicCache(iosReminderKey(expectedAccountId,event.id)) },
+                                    festivalRevision = savedFestivalRevision
+                                )
                             }
                         }
                     }
@@ -614,25 +830,10 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                         }
                     }
                     "Comunitat" -> {
-                        Column(Modifier.fillMaxSize()) {
-                            PageTitle("Comunitat")
-                            if (account == null) LoginPrompt { loginOpen = true }
-                            else {
-                                TextButton(onClick = { work { groups = api.community() } }, modifier = Modifier.padding(horizontal = 12.dp)) { Text("↻ Actualitzar comunitat") }
-                                if (groups.isEmpty()) EmptyState("No hi ha taulons disponibles.")
-                                else LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    items(groups, key = { it.id }) { g ->
-                                        ElevatedCard(Modifier.fillMaxWidth().clickable { communityGroup = g }) {
-                                            Column(Modifier.padding(13.dp)) {
-                                                Text(g.title.ifBlank { "Tauló #${g.id}" }, fontWeight = FontWeight.Bold)
-                                                Text("${g.type} · ${g.access}", fontSize = 12.sp, color = Color.Gray)
-                                                if (g.description.isNotBlank()) Text(g.description, maxLines = 2, fontSize = 13.sp)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        if (account == null) LoginPrompt { loginOpen = true }
+                        else IosCommunityHub(groups, api, isAdmin = IosCommunityPolicy.canSeeAdminQueue(account?.role.orEmpty()),
+                            reload = { mine -> work { groups = api.community(mine=mine) } },
+                            onOpen = { communityGroup = it })
                     }
                     "Perfil" -> {
                         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
@@ -642,8 +843,25 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                 Text("No has iniciat sessió.")
                                 Button(onClick = { loginOpen = true }) { Text("Iniciar sessió") }
                             } else {
-                                Text(account?.username.orEmpty(), fontWeight = FontWeight.Bold)
-                                Text(account?.email.orEmpty(), fontSize = 12.sp)
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Box(Modifier.size(72.dp).clip(CircleShape).background(Accent), contentAlignment = Alignment.Center) {
+                                        if (!myProfile?.photoUrl.isNullOrBlank())
+                                            AsyncImage(model = myProfile?.photoUrl, contentDescription = "Foto del meu perfil", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                        else Text(account?.username.orEmpty().take(1).uppercase(), fontSize = 27.sp)
+                                    }
+                                    Column {
+                                        Text(myProfile?.displayName?.ifBlank { account?.username.orEmpty() } ?: account?.username.orEmpty(), fontWeight = FontWeight.Bold)
+                                        Text("@${account?.username.orEmpty()}", fontSize = 12.sp)
+                                        Text(account?.email.orEmpty(), fontSize = 12.sp)
+                                    }
+                                }
+                                OutlinedButton(onClick = {
+                                    val expectedId = account?.id
+                                    work {
+                                        val loaded = api.myPublicProfile()
+                                        if (account?.id == expectedId) { myProfile = loaded; editProfileOpen = true }
+                                    }
+                                }) { Text("Editar nom, foto i biografia") }
                                 Text("Rol: ${account?.role}", fontSize = 12.sp)
                                 Text("Artistes seguits: ${user.follows.count { it.type == "ARTIST" }}")
                                 Button(onClick = { loadAccountPages() }) { Text("Actualitzar dades") }
@@ -659,10 +877,11 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                         }
                                     }) { Text("Tipus de compte i dades professionals") }
                                 }
+                                OutlinedButton(onClick = { deleteAccountOpen = true }) { Text("Eliminar el meu compte") }
                                 OutlinedButton(onClick = { work {
                                     try { api.signOutSecurely() } catch (_: Exception) { /* Local token is always revoked. */ }
-                                    account = null; user = IosUserState(); tickets = emptyList()
-                                    notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList(); searchTown = ""; searchCategory = ""; newSearchName = ""
+                                    account = null; myProfile = null; user = IosUserState(); artistBells = emptyMap(); tickets = emptyList()
+                                    notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList(); searchTown = ""; searchCategory = ""; searchComarca = ""; searchStyle = ""; searchRadius = 0; searchFromDate = ""; searchToDate = ""; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null; newSearchName = ""
                                     useAccountPreferences(null)
                                     status = "Sessió tancada"
                                 } }) { Text("Tancar sessió") }
@@ -673,7 +892,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                 }
                                 if (account?.role == "SUPER_ADMIN") {
                                     Divider()
-                                    AdminNotificationPanel(api, work = ::work, onMessage = { status = it })
+                                    IosSuperAdminConsole(api, actorId = account?.id ?: 0, onMessage = { status = it })
                                 }
                             }
                             if (account != null && user.follows.isNotEmpty()) {
@@ -700,10 +919,22 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                     }
                 }
             }
-            NavigationBar(containerColor = Pale) {
-                listOf("Inici" to "⌂", "Guardats" to "♥", "Entrades" to "▤", "Comunitat" to "♙").forEach { (name, symbol) ->
-                    NavigationBarItem(selected = tab == name, onClick = { tab = name },
-                        icon = { Text(symbol, fontSize = 20.sp) }, label = { Text(name, fontSize = 10.sp) })
+            Row(Modifier.fillMaxWidth().height(62.dp).background(Color(0xFFF1F1F1))
+                .padding(horizontal = 7.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                listOf("Inici" to "home", "Guardats" to "bookmark", "Entrades" to "ticket",
+                    "Comunitat" to "people").forEach { (name, symbol) ->
+                    Row(Modifier.weight(1f).fillMaxHeight()
+                        .background(if (tab == name) Color(0xFFDCDCDC) else Color.Transparent,
+                            RoundedCornerShape(12.dp))
+                        .clickable { tab = name }.padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                        AgendaGlyph(symbol, Modifier.size(19.dp),
+                            when (name) { "Guardats", "Entrades" -> Color(0xFFCF4547)
+                                "Comunitat" -> Color(0xFF287BBF); else -> AgendaBlack })
+                        Spacer(Modifier.width(5.dp))
+                        Text(name, fontSize = 11.sp, maxLines = 1,
+                            fontWeight = if (tab == name) FontWeight.Bold else FontWeight.Normal)
+                    }
                 }
             }
         }
@@ -721,23 +952,41 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         if (registrationOpen) RegistrationDialog(onDismiss = { registrationOpen = false }, onSubmit = { username, email, password ->
             work {
                 account = api.registerAccount(username, email, password)
-                user = IosUserState(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList(); searchTown = ""; searchCategory = ""; newSearchName = ""
+                user = IosUserState(); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList(); searchTown = ""; searchCategory = ""; searchComarca = ""; searchStyle = ""; searchRadius = 0; searchFromDate = ""; searchToDate = ""; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null; newSearchName = ""
                 useAccountPreferences(account?.id)
                 registrationOpen = false; loginOpen = false; status = "Compte creat"
                 loadAccountPages()
+                myProfile = runCatching { api.myPublicProfile() }.getOrNull()
             }
         })
-        if (loginOpen) LoginDialog(onDismiss = { loginOpen = false }, onRegister = {
+        if (loginOpen) LoginDialog(onDismiss = { loginOpen = false }, onSocial = { provider ->
+            sessionBridge?.beginSocialSignIn(provider, object : IosSocialAuthCallback {
+                override fun onComplete(idToken: String, nonce: String, authError: String) {
+                    if (authError.isNotBlank()) { error = authError; return }
+                    work {
+                        val next = api.signInWithProvider(provider, idToken, nonce)
+                        account = next
+                        user = IosUserState(); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList()
+                        groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList()
+                        myProfile = null; useAccountPreferences(next.id)
+                        loginOpen = false; status = "Sessió iniciada amb $provider"
+                        loadAccountPages()
+                        runCatching { myProfile = api.myPublicProfile() }
+                    }
+                }
+            }) ?: run { error = "No hi ha disponible el pont d'autenticació d'iPhone." }
+        }, onRegister = {
             loginOpen = false; registrationOpen = true
         }, onForgotPassword = {
             loginOpen = false; resetOpen = true
         }, onSubmit = { login, password ->
             work {
                 account = api.signIn(login, password)
-                user = IosUserState(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList(); searchTown = ""; searchCategory = ""; newSearchName = ""
+                user = IosUserState(); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList(); searchTown = ""; searchCategory = ""; searchComarca = ""; searchStyle = ""; searchRadius = 0; searchFromDate = ""; searchToDate = ""; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null; newSearchName = ""
                 useAccountPreferences(account?.id)
                 loginOpen = false; status = "Sessió iniciada"
                 loadAccountPages()
+                myProfile = runCatching { api.myPublicProfile() }.getOrNull()
             }
         })
         if (prefOpen) PersonalizationDialog(chosenCategories, chosenTowns, excludedEventIds, excludedArtists,
@@ -782,7 +1031,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 }
             }
         }
-        if (notificationsOpen) NotificationsDialog(notices, onDismiss = { notificationsOpen = false }, onRead = { notice ->
+        if (notificationsOpen) NotificationsDialog(notices, artistBells.values.sortedBy { it.artistName }, eventsById = eventById, onDismiss = { notificationsOpen = false }, onRead = { notice ->
             work { api.markRead(notice.id); notices = notices.map { if (it.id == notice.id) it.copy(read = true) else it } }
             when (notice.linkType.uppercase()) {
                 "EVENT", "EVENT_ID", "EVENT_DETAIL" -> notice.linkValue.toIntOrNull()?.let { id ->
@@ -790,30 +1039,45 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 }
                 "TICKETS", "TICKET" -> { notificationsOpen = false; tab = "Entrades" }
                 "COMMUNITY" -> { notificationsOpen = false; tab = "Comunitat" }
-                "ARTIST" -> { if (notice.linkValue.isNotBlank()) {
+                "ARTIST", "NEW_ARTIST_EVENT" -> { if (notice.linkValue.isNotBlank()) {
                     notificationsOpen = false; artistSourceEvent = null; artist = notice.linkValue
                 } }
             }
         }, reminders = events.filter { it.id in user.alerts && (it.endDate.ifBlank { it.date }.isBlank() || it.endDate.ifBlank { it.date } >= today) },
             onReminderClick = { ev -> notificationsOpen = false; showEvent(ev) },
             onReminderDisable = { ev -> notificationsOpen = false; alertToDisable = ev },
+            onArtistBell = { name -> notificationsOpen = false; artistBellEditing = name },
             reminderTime = { ev -> account?.id?.let { id -> platformReadPublicCache(iosReminderKey(id,ev.id)) }.orEmpty() })
-        if (batecStoryKey != null && followedStories.isNotEmpty()) {
-            BatecViewer(followedStories, batecStoryKey!!,
-                eventFor = { id -> eventById[id] },
-                onDismiss = { batecStoryKey = null },
+        val openedBatecGroup = followedGroups.firstOrNull { it.key == batecStoryKey }
+        if (batecStoryKey != null && openedBatecGroup != null) {
+            BatecViewer(
+                groups = followedGroups,
+                selectedKey = openedBatecGroup.key,
+                stories = batecs,
+                allEvents = available,
+                onDismiss = ::closeBatecs,
                 onOpenEvent = { id ->
-                    batecStoryKey = null
+                    closeBatecs()
                     eventById[id]?.let { showEvent(it) }
                 },
-                onStoryChanged = { story -> batecStoryKey = story.storyKey })
-            // Each opened story is marked viewed once. Account-scoped server state is authoritative.
+                onGroupChanged = { next -> batecStoryKey = next.key }
+            )
+            // Mark every actual publication of the artist as seen. A failed request
+            // must not invent server state or turn the ring grey optimistically.
             LaunchedEffect(batecStoryKey, account?.id) {
-                val key = batecStoryKey
-                if (key != null && account != null && key !in seenBatecs) {
-                    val expectedId = account?.id
-                    runCatching { api.markBatecSeen(key) }.onSuccess {
-                        if (account?.id == expectedId) seenBatecs = seenBatecs + key
+                val expectedId = account?.id
+                val group = followedGroups.firstOrNull { it.key == batecStoryKey }
+                if (expectedId != null && group != null) {
+                    val pending = group.storyKeys.filter { it !in seenBatecs }
+                    // This job belongs to the screen, not to the current story:
+                    // a quick swipe must not cancel marking the previous group.
+                    scope.launch {
+                        pending.forEach { key ->
+                            if (account?.id != expectedId) return@launch
+                            runCatching { api.markBatecSeen(key) }.onSuccess {
+                                if (account?.id == expectedId) seenBatecs = seenBatecs + key
+                            }
+                        }
                     }
                 }
             }
@@ -822,7 +1086,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             matchedArtist = festivalMatchedArtist,
             followsEntity = { type, name -> user.followsType(type, name) },
             onToggleFollowEntity = { type, name -> toggleFollowEntity(type, name) },
-            onDismiss = { selected = null; festivalMatchedArtist = "" },
+            onDismiss = { selected = null; festivalMatchedArtist = ""; savedFestivalRevision++ },
             onSave = { toggleSaved(ev) }, onReminder = { if (ev.id in user.alerts) alertToDisable = ev else reminderToSchedule = ev },
             userId = account?.id, onReport = { selected = null; reportEvent = ev },
             loadSchedule = api::festivalSchedule,
@@ -848,8 +1112,41 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             val fromFestival = artistSourceEvent?.let { listOf(it) }.orEmpty()
             ArtistDialog(value, user.follows(value), (fromFestival + matchingEvents).distinctBy { it.key },
                 onFollow = { toggleFollow(value) },
+                bell = artistBells[IosArtistBellPolicy.key(value)],
+                onBell = {
+                    if (account == null) loginOpen = true
+                    else {
+                        artistBellEditing = value
+                        val requestedUser = account?.id
+                        work {
+                            val bells = api.artistBells()
+                            if (account?.id == requestedUser) artistBells = bells.filter { b -> b.enabled }
+                                .associateBy { b -> IosArtistBellPolicy.key(b.artistName) }
+                        }
+                    }
+                },
                 onDismiss = { artist = null; artistSourceEvent = null },
                 onEvent = { artist = null; artistSourceEvent = null; showEvent(it) })
+        }
+        artistBellEditing?.let { selectedArtist ->
+            val existing = artistBells[IosArtistBellPolicy.key(selectedArtist)]
+            ArtistBellEditorDialog(selectedArtist, existing,
+                onDismiss = { artistBellEditing = null },
+                onSave = { enabled, frequency ->
+                    val requestUser = account?.id
+                    if (requestUser == null) { artistBellEditing = null; loginOpen = true }
+                    else work {
+                        val saved = api.saveArtistBell(selectedArtist, enabled, frequency)
+                        if (account?.id == requestUser) {
+                            artistBells = IosArtistBellPolicy.update(artistBells, saved)
+                            artistBellEditing = null
+                            status = if (enabled) "Campaneta guardada · ${IosArtistBellPolicy.label(frequency)}" else "Campaneta desactivada"
+                            if (enabled) IosNativeBridge.current?.requestRemoteNotifications(object : IosReminderSchedulingCallback {
+                                override fun onResult(success: Boolean, message: String) { /* Apple controls the permission separately. */ }
+                            })
+                        }
+                    }
+                })
         }
         if (profileSettingsOpen && profileSettings != null) {
             ProfileSettingsEditor(profileSettings!!, onDismiss = { profileSettingsOpen = false }, onSave = { role, phone ->
@@ -865,6 +1162,50 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 }
             })
         }
+        if (editProfileOpen && account != null) {
+            ProfileEditIosDialog(myProfile ?: IosMyProfile(account?.username.orEmpty(), "", ""),
+                onDismiss = { editProfileOpen = false },
+                onPickImage = {
+                    sessionBridge?.pickProfilePhoto(object : IosPickedPhotoCallback {
+                        override fun onComplete(base64Jpeg: String, imageError: String) {
+                            if (imageError.isNotBlank()) { error = imageError; return }
+                            val expectedId = account?.id
+                            work {
+                                val url = api.uploadMyPhoto(base64Jpeg)
+                                if (expectedId != null && account?.id == expectedId) {
+                                    myProfile = (myProfile ?: IosMyProfile("", "", "")).copy(photoUrl = url)
+                                    status = "Foto guardada al servidor"
+                                }
+                            }
+                        }
+                    }) ?: run { error = "El selector de fotografies no està disponible." }
+                },
+                onSave = { name, bio, remove ->
+                    val expectedId = account?.id
+                    work {
+                        val saved = api.updateMyPublicProfile(name, bio, remove)
+                        if (account?.id == expectedId) { myProfile = saved; editProfileOpen = false; status = "Perfil guardat" }
+                    }
+                })
+        }
+        if (deleteAccountOpen && account != null) {
+            DeleteAccountIosDialog(onDismiss = { deleteAccountOpen = false }, onDelete = { phrase, password ->
+                val expectedId = account?.id
+                work {
+                    api.deleteMyAccount(phrase, password)
+                    if (account?.id == expectedId) {
+                        // Revokes local reminders for the previous identity and clears account-scoped UI.
+                        user.alerts.forEach { eventId -> sessionBridge?.cancelLocalReminder(expectedId ?: 0, eventId) }
+                        account = null; myProfile = null; user = IosUserState(); artistBells = emptyMap()
+                        tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet()
+                        savedLists = emptyList(); searchPresets = emptyList()
+                        sessionBridge?.eraseLocalAccountData(expectedId ?: 0)
+                        useAccountPreferences(null); deleteAccountOpen = false
+                        status = "Compte desactivat i dades personals retirades del servidor"
+                    }
+                }
+            })
+        }
         if (validatorOpen) ProfessionalValidationDialog(api, onDismiss = { validatorOpen = false })
         ticketEvent?.let { event -> TicketOptionsDialog(event, api,
             onDismiss = { ticketEvent = null }, onPurchased = {
@@ -874,8 +1215,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         groupCreateFor?.let { event -> CreateGroupDialog(event, api, onDismiss = { groupCreateFor = null },
             onCreated = { groupCreateFor = null; status = "Tauló creat"; work { groups = api.community(event.id) } },
             onError = { error = it }) }
-        communityGroup?.let { g -> ChatDialog(g, api, isCreator = g.creatorUserId > 0 && g.creatorUserId == account?.id,
-            onDismiss = { communityGroup = null }, work = ::work) }
+        communityGroup?.let { g -> IosCommunityChatDialog(g, api, account?.id ?: 0,
+            onDismiss = { communityGroup = null }, onChanged = { work { groups = api.community() } }) }
         reminderToSchedule?.let { ev -> ReminderEditorDialog(ev, account?.id ?: 0,
             onDismiss = { reminderToSchedule = null }, onSave = { requestedAt ->
             reminderToSchedule = null
@@ -940,6 +1281,70 @@ private fun EventCard(ev: AgendaEventSummary, isSaved: Boolean, onClick: () -> U
     }
     HorizontalDivider(color = Color(0xFFEEEEEE))
 }
+/** The compact WHITE card used by Android's 'Sense filtre' and 'Per a tu'.
+ * A fixed-width date/save column keeps its title single-line, without clipping metadata.
+ * Festival summaries refer to the relevant day only; tapping still opens the original popup. */
+@Composable
+private fun FeedCompactEventCard(ev: AgendaEventSummary, today: String, onClick: () -> Unit,
+                                  trailing: @Composable () -> Unit) {
+    val scheduledDays = ev.schedule.map { it.date }
+    val shownDate = IosUnfilteredFeedPolicy.relevantDate(ev.date, ev.endDate, today,
+        if (ev.isFestival) scheduledDays else emptyList())
+    val ongoing = ev.isFestival && IosUnfilteredFeedPolicy.ongoingWithoutSchedule(
+        ev.date, ev.endDate, today, scheduledDays)
+    val subtitle = if (ev.isFestival && !ongoing) {
+        IosUnfilteredFeedPolicy.festivalSummary(shownDate,
+            ev.schedule.map { it.date to it.artist.ifBlank { it.title } },
+            ev.artists.joinToString(" · ").ifBlank { ev.subtitle })
+    } else if (ev.isFestival) "" else ev.subtitle
+    val categoryColor = when {
+        ev.category.contains("música", true) || ev.category.contains("musica", true) -> Color(0xFF8C59A9)
+        ev.category.contains("teatre", true) || ev.category.contains("escèn", true) -> Color(0xFFAE673F)
+        ev.category.contains("cinema", true) || ev.category.contains("audiovisual", true) -> Color(0xFF447EA0)
+        else -> Color(0xFF766C87)
+    }
+    Column {
+        Row(Modifier.fillMaxWidth().clickable(onClick = onClick)
+            .padding(start = 14.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(98.dp).height(116.dp)
+                .border(1.5.dp, categoryColor, RoundedCornerShape(9.dp))
+                .padding(2.dp).clip(RoundedCornerShape(7.dp))) {
+                Poster(ev.posterUrl, Modifier.fillMaxSize())
+            }
+            Spacer(Modifier.width(11.dp))
+            Column(Modifier.weight(1f).heightIn(min = if (subtitle.isNotBlank()) 116.dp else 102.dp),
+                verticalArrangement = Arrangement.Center) {
+                Text(ev.title, fontWeight = FontWeight.Bold, fontSize = 17.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (subtitle.isNotBlank()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(subtitle, fontSize = 12.sp, maxLines = 1,
+                        color = Color.DarkGray, overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("📍 ${listOf(ev.town,ev.venue).filter(String::isNotBlank).joinToString(" · ")}",
+                    fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    color = Ink)
+                Spacer(Modifier.height(4.dp))
+                val displayedTime = if (ongoing) "" else ev.time
+                val ticket = IosUnfilteredFeedPolicy.ticketLabel(ev.ticketAvailable, ev.price)
+                Text("◷ ${displayedTime.ifBlank { "—" }} · $ticket", fontSize = 12.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color.DarkGray)
+            }
+            Spacer(Modifier.width(5.dp))
+            Column(Modifier.width(64.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(ev.category, fontSize = 9.sp, maxLines = 1,
+                    color = categoryColor, overflow = TextOverflow.Ellipsis)
+                Text(if (ongoing) "En curs" else IosUnfilteredFeedPolicy.cardDate(shownDate),
+                    fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Ink, maxLines = 1)
+                trailing()
+            }
+        }
+        HorizontalDivider(color = Color(0xFFEEEEEE))
+    }
+}
+
 /** Keep the paid campaign's own crop focal point, independent of the event poster. */
 @Composable
 private fun SponsoredPoster(ad: IosAd, fallback: String, modifier: Modifier = Modifier) {
@@ -963,27 +1368,46 @@ private fun SponsoredCarousel(label: String, ads: List<IosAd>, eventById: Map<In
     if (ads.isEmpty()) return
     val start = remember(ads) { ((currentEpochMillis() / (30 * 60 * 1000L)) % ads.size).toInt() }
     val state = androidx.compose.foundation.lazy.rememberLazyListState(initialFirstVisibleItemIndex = start)
-    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-        Text("Publicitat · $label", fontSize = 11.sp, color = Color.DarkGray,
-            modifier = Modifier.padding(horizontal = 15.dp, vertical = 4.dp))
-        LazyRow(state = state, contentPadding = PaddingValues(horizontal = 15.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val cardWidth = if (header) maxWidth - 24.dp else 270.dp
+        LazyRow(state = state, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             items(ads, key = { "${it.placement}_${it.id}" }) { ad ->
                 val event = eventById[ad.eventId]
                 LaunchedEffect(ad.id, ad.placement) { onViewed(ad) }
-                Surface(shape = RoundedCornerShape(15.dp), color = Color.White,
-                    tonalElevation = 1.dp, shadowElevation = 1.dp,
-                    modifier = Modifier.width(if (header) 308.dp else 270.dp)
+                if (header) {
+                    Box(Modifier.width(cardWidth).height(133.dp)
+                        .clip(RoundedCornerShape(17.dp))
                         .clickable(enabled = event != null) { event?.let { onOpened(ad, it) } }) {
-                    Column {
-                        SponsoredPoster(ad, event?.posterUrl.orEmpty(),
-                            Modifier.fillMaxWidth().height(if (header) 134.dp else 120.dp))
-                        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-                            Text(event?.title ?: "Activitat patrocinada", fontWeight = FontWeight.SemiBold,
-                                maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 14.sp)
+                        SponsoredPoster(ad, event?.posterUrl.orEmpty(), Modifier.fillMaxSize())
+                        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
+                            Color.Transparent, Color.Black.copy(alpha = 0.12f), Color.Black.copy(alpha = 0.72f)))))
+                        Column(Modifier.align(Alignment.BottomStart).padding(12.dp)) {
+                            Text(event?.title ?: "Activitat patrocinada", color = Color.White,
+                                fontWeight = FontWeight.Bold, fontSize = 17.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
                             if (event != null) {
-                                Text("${event.date} · ${event.town}", maxLines = 1,
-                                    fontSize = 11.sp, color = Color.DarkGray)
+                                Text(event.artists.take(3).joinToString(" · ").ifBlank { event.category },
+                                    color=Color.White, fontSize = 12.sp, maxLines=1, overflow=TextOverflow.Ellipsis)
+                                Text("${event.town} · ${IosUnfilteredFeedPolicy.cardDate(event.date)} · ${event.time}",
+                                    color=Color.White, fontSize = 12.sp, maxLines=1)
+                            }
+                        }
+                        AgendaGlyph("bookmark", Modifier.align(Alignment.BottomEnd)
+                            .padding(bottom=10.dp,end=10.dp).size(21.dp), Color.White)
+                    }
+                } else {
+                    Surface(shape = RoundedCornerShape(15.dp), color = Color.White,
+                        tonalElevation = 1.dp, shadowElevation = 1.dp,
+                        modifier = Modifier.width(cardWidth)
+                            .clickable(enabled = event != null) { event?.let { onOpened(ad, it) } }) {
+                        Column {
+                            SponsoredPoster(ad, event?.posterUrl.orEmpty(), Modifier.fillMaxWidth().height(120.dp))
+                            Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                                Text(event?.title ?: "Activitat patrocinada", fontWeight = FontWeight.SemiBold,
+                                    maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 14.sp)
+                                if (event != null) Text("${event.date} · ${event.town}",
+                                    maxLines = 1, fontSize = 11.sp, color = Color.DarkGray)
                             }
                         }
                     }
@@ -996,16 +1420,24 @@ private fun SponsoredCarousel(label: String, ads: List<IosAd>, eventById: Map<In
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EventList(events: List<AgendaEventSummary>, total: Int, onLoadMore: () -> Unit,
+                      today: String, scrollContext: String,
                       savedIds: Set<Int>, onClick: (AgendaEventSummary) -> Unit,
                       onSave: (AgendaEventSummary) -> Unit, ads: List<IosAd>,
                       protectedIds: Set<Int>, commercialEvents: Map<Int, AgendaEventSummary>,
                       onAdViewed: (IosAd) -> Unit,
                       onAdOpened: (IosAd, AgendaEventSummary) -> Unit,
                       refreshing: Boolean, onRefresh: () -> Unit,
+                      returnToStartEpoch: Int,
                       onExclude: (AgendaEventSummary, String) -> Unit,
                       onReport: (AgendaEventSummary) -> Unit) {
     val listState = rememberLazyListState()
-    val headerAds = remember(ads) { ads.filter { it.placement == "HEADER" } }
+    // A new mode/confirmed search has a new sequence. Do not reuse a deep scroll position
+    // from an old filtered feed, even if the advertisement header is present.
+    LaunchedEffect(scrollContext) { listState.scrollToItem(0) }
+    // Closing the Batec returns the whole feed to its first card/ad, not only the story strip.
+    LaunchedEffect(returnToStartEpoch) {
+        if (returnToStartEpoch > 0) listState.scrollToItem(0)
+    }
     val premiumAds = remember(ads) { ads.filter { it.placement == "FEED_PREMIUM" } }
     val normalAds = remember(ads) { ads.filter { it.placement == "FEED_NORMAL" } }
     val premium = premiumAds.isNotEmpty()
@@ -1014,17 +1446,11 @@ private fun EventList(events: List<AgendaEventSummary>, total: Int, onLoadMore: 
     // Otherwise paid ads with distant events would be impossible to open.
     val eventById = commercialEvents
     val advertisedEventIds = remember(ads) { ads.mapTo(HashSet()) { it.eventId } }
-    val nearBottom by remember(listState, events.size) { derivedStateOf {
-        val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-        last >= events.size - 3 && last >= 0
-    } }
-    LaunchedEffect(nearBottom, events.size, total) { if (nearBottom && events.size < total) onLoadMore() }
+    // LazyColumn composes this sentinel only when the user reaches the real end of a
+    // rendered batch. Counting index positions instead breaks when HEADER/paid ads exist.
     PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh,
         modifier = Modifier.fillMaxSize(), indicator = {}) {
         LazyColumn(state = listState, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 5.dp)) {
-            if (headerAds.isNotEmpty()) item(key = "ad_header", contentType = "sponsored") {
-                SponsoredCarousel("Capçalera", headerAds, eventById, onAdViewed, onAdOpened, header = true)
-            }
             itemsIndexed(events, key = { _, ev -> ev.key }, contentType = { _, _ -> "event" }) { index, ev ->
                 Column {
                     if (GlobalAdPlacementPolicy.premiumAt(index, premium, normal)) {
@@ -1034,13 +1460,22 @@ private fun EventList(events: List<AgendaEventSummary>, total: Int, onLoadMore: 
                         SponsoredCarousel("Normal", normalAds, eventById, onAdViewed, onAdOpened)
                     }
                     val isCommercial = ev.id in protectedIds || ev.ticketAvailable || ev.id in advertisedEventIds
-                    Box(Modifier.padding(horizontal = 15.dp)) {
-                        EventCard(ev, ev.id in savedIds, onClick = { onClick(ev) }, trailing = {
+                    Box(Modifier.fillMaxWidth()) {
+                        FeedCompactEventCard(ev, today, onClick = { onClick(ev) }, trailing = {
                             var menuVisible by remember(ev.key) { mutableStateOf(false) }
-                            TextButton(onClick = { onSave(ev) }) { Text(if (ev.id in savedIds) "▣" else "▢", fontSize = 22.sp) }
-                            Box {
-                                TextButton(onClick = { menuVisible = true }) { Text("⋮", fontSize = 23.sp) }
-                                DropdownMenu(expanded = menuVisible, onDismissRequest = { menuVisible = false }) {
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(1.dp)) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Box(Modifier.size(32.dp).clickable { onSave(ev) }, contentAlignment = Alignment.Center) {
+                                        AgendaGlyph("bookmark", Modifier.size(20.dp), if (ev.id in savedIds) Ink else Color.Gray)
+                                    }
+                                    Text(ev.savedCount.toString(), fontSize = 9.sp, color = Color.Gray)
+                                }
+                                Box {
+                                    Box(Modifier.size(32.dp).clickable { menuVisible = true }, contentAlignment = Alignment.Center) {
+                                        Text("⋮", fontSize = 20.sp)
+                                    }
+                                    DropdownMenu(expanded = menuVisible, onDismissRequest = { menuVisible = false }) {
                                     DropdownMenuItem(text = { Text("Informar d'una incidència") }, onClick = {
                                         menuVisible = false; onReport(ev)
                                     })
@@ -1063,6 +1498,7 @@ private fun EventList(events: List<AgendaEventSummary>, total: Int, onLoadMore: 
                                         }
                                     }
                                 }
+                                }
                             }
                         })
                     }
@@ -1082,8 +1518,9 @@ private fun EventList(events: List<AgendaEventSummary>, total: Int, onLoadMore: 
                     }
                 }
             }
-            if (events.size < total) item(key = "load_more") {
-                TextButton(onClick = onLoadMore, modifier = Modifier.fillMaxWidth()) { Text("Mostrar més") }
+            if (events.size < total) item(key = "load_more_${events.size}", contentType = "page_sentinel") {
+                LaunchedEffect(events.size, total) { onLoadMore() }
+                Spacer(Modifier.fillMaxWidth().height(1.dp))
             }
             if (events.isEmpty() && ads.isEmpty()) item(key = "empty") {
                 EmptyState("No hi ha activitats que coincidisquen amb els criteris actuals.")
@@ -1136,7 +1573,7 @@ private fun EventReportDialog(event: AgendaEventSummary, onDismiss: () -> Unit,
 }
 
 @Composable
-private fun LoginDialog(onDismiss: () -> Unit, onRegister: () -> Unit,
+private fun LoginDialog(onDismiss: () -> Unit, onSocial: (String) -> Unit, onRegister: () -> Unit,
                         onForgotPassword: () -> Unit, onSubmit: (String, String) -> Unit) {
     var login by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -1147,6 +1584,8 @@ private fun LoginDialog(onDismiss: () -> Unit, onRegister: () -> Unit,
             OutlinedTextField(value = password, onValueChange = { password = it }, singleLine = true, label = { Text("Contrasenya") },
                 visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
             Text("Connexió al mateix compte de L'Agenda. La contrasenya no es guarda al dispositiu.", fontSize = 11.sp, color = Color.Gray)
+            OutlinedButton(onClick = { onSocial("APPLE") }, modifier = Modifier.fillMaxWidth()) { Text("Continua amb Apple") }
+            OutlinedButton(onClick = { onSocial("GOOGLE") }, modifier = Modifier.fillMaxWidth()) { Text("Continua amb Google") }
             TextButton(onClick = onRegister) { Text("Crear compte nou") }
             TextButton(onClick = onForgotPassword) { Text("He oblidat la contrasenya") }
         } },
@@ -1355,7 +1794,7 @@ private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: B
             (it.artist.contains(matchedArtist, true) || it.title.contains(matchedArtist, true)) }
     }
     var section by remember(ev.id, matchedArtist) {
-        mutableStateOf(if (ev.isFestival) "Horaris" else "Info")
+        mutableStateOf(if (ev.isFestival) "Horaris" else "Artistes")
     }
     var selectedDay by remember(ev.id, matchedArtist) {
         mutableStateOf(targetSlot?.date?.take(10)?.takeIf(String::isNotBlank) ?: festivalDays.firstOrNull().orEmpty())
@@ -1378,51 +1817,130 @@ private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: B
         platformWritePublicCache(slotCache, IosFestivalSavedSlotPolicy.encode(next))
         localSaveNote = if (key in next) "Actuació guardada en este iPhone" else "Actuació llevada de l'horari guardat"
     }
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(shape = RoundedCornerShape(20.dp), color = Color.White,
-            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.92f)) {
+    Dialog(onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(shape = RoundedCornerShape(22.dp), color = Color.White,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp).fillMaxHeight(0.78f)) {
             Column {
-                Box(Modifier.fillMaxWidth().height(170.dp)) {
+                // Android event popup: image/title/date/place form a SINGLE gradient hero.
+                Box(Modifier.fillMaxWidth().height(154.dp)) {
                     Poster(ev.posterUrl, Modifier.fillMaxSize())
-                    TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.TopEnd)) {
-                        Text("✕", color = Color.White, fontWeight = FontWeight.Bold)
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
+                        colors = listOf(Color.Black.copy(alpha = .08f),
+                            Color.Black.copy(alpha = .19f), Color.Black.copy(alpha = .91f)))))
+                    Column(Modifier.align(Alignment.BottomStart).padding(start = 15.dp, end = 8.dp, bottom = 13.dp)) {
+                        Text("ESDEVENIMENT", color = Color.White, fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(4.dp))
+                        Text(ev.title, color = Color.White, fontSize = 22.sp,
+                            fontWeight = FontWeight.ExtraBold, maxLines = 2,
+                            overflow = TextOverflow.Ellipsis)
+                        Spacer(Modifier.height(5.dp))
+                        Text(IosUnfilteredFeedPolicy.fullDate(ev.date), color = AgendaGold,
+                            fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text("⌖  ${listOf(ev.venue,ev.town).filter(String::isNotBlank).joinToString(" · ")}",
+                            color = Color.White, fontSize = 13.sp, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis)
+                    }
+                    Row(Modifier.align(Alignment.TopEnd).padding(7.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Box(Modifier.size(43.dp).background(Color.White, CircleShape)
+                            .clickable(onClick = onReminder), contentAlignment = Alignment.Center) {
+                            AgendaGlyph("bell", Modifier.size(23.dp))
+                        }
+                        Box(Modifier.size(43.dp).background(Color.White, CircleShape)
+                            .clickable { IosNativeBridge.current?.shareText(
+                                listOf(ev.title,ev.date,ev.venue,ev.town,ev.ticketUrl)
+                                    .filter(String::isNotBlank).joinToString(" · ")) },
+                            contentAlignment = Alignment.Center) { AgendaGlyph("share", Modifier.size(23.dp)) }
+                        Box(Modifier.size(43.dp).background(Color.White, CircleShape)
+                            .clickable(onClick = onDismiss), contentAlignment = Alignment.Center) {
+                            AgendaGlyph("close", Modifier.size(23.dp))
+                        }
                     }
                     if (ev.posterUrl.isNotBlank()) {
-                        TextButton(onClick = { showPoster = true },
-                            modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp)
-                                .background(Color.Black.copy(alpha = 0.48f), RoundedCornerShape(18.dp))) {
-                            Text("▣  Cartell", color = Color.White, fontSize = 12.sp)
+                        Surface(Modifier.align(Alignment.TopStart).padding(8.dp)
+                            .clickable { showPoster = true }, shape = RoundedCornerShape(20.dp),
+                            color = Color.Black.copy(alpha=.55f)) {
+                            Text("▣  Cartell", Modifier.padding(horizontal = 11.dp,vertical = 7.dp),
+                                color = Color.White,fontSize=11.sp)
                         }
                     }
                 }
-                Column(Modifier.padding(horizontal = 13.dp, vertical = 7.dp)) {
-                    Text(ev.title, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                    Text(listOf(ev.date, ev.time, ev.town, ev.venue).filter(String::isNotBlank).joinToString(" · "),
-                        fontSize = 12.sp, color = Color.Gray)
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = onSave) { Text(if (saved) "▣ Guardat" else "▢ Guardar") }
-                        TextButton(onClick = onReminder) { Text(if (reminded) "♧ Avís actiu" else "♧ Recordatori") }
-                        if (ev.isFestival && ev.ticketAvailable) {
-                            TextButton(onClick = onTickets) { Text("🎟 Entrades") }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    AgendaGlyph("calendar", Modifier.size(19.dp), Color.Gray)
+                    Spacer(Modifier.width(7.dp))
+                    Text("${IosUnfilteredFeedPolicy.fullDate(ev.date)} · ${ev.time}",
+                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.weight(1f))
+                    Text(IosUnfilteredFeedPolicy.ticketLabel(ev.ticketAvailable,ev.price),
+                        color = Color(0xFF946C00), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(shape = RoundedCornerShape(12.dp), color = Color.White,
+                        border = BorderStroke(1.dp, AgendaBlack),
+                        modifier = Modifier.weight(1f).height(43.dp).clickable(onClick = onSave)) {
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center) {
+                            AgendaGlyph("bookmark", Modifier.size(17.dp))
+                            Spacer(Modifier.width(7.dp))
+                            Text(if (saved) "Guardat" else "Guardar", fontSize=13.sp,
+                                fontWeight = FontWeight.SemiBold)
                         }
                     }
-                    // Four fixed destinations, with a separate ticket CTA for festivals.
-                    val tabs = if (ev.isFestival) listOf("Horaris", "Info", "Ubicació", "Comunitat")
-                        else listOf("Info", "Entrades", "Ubicació", "Comunitat")
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                        tabs.forEach { name ->
-                            TextButton(onClick = { section = name }, modifier = Modifier.weight(1f),
-                                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 6.dp)) {
-                                Text(name, fontSize = 10.sp,
-                                    fontWeight = if (section == name) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (section == name) Ink else Color.DarkGray, maxLines = 1)
-                            }
+                    Surface(shape=RoundedCornerShape(12.dp), color=AgendaBlack,
+                        modifier=Modifier.weight(1f).height(43.dp).clickable(onClick=onTickets)) {
+                        Row(verticalAlignment=Alignment.CenterVertically,
+                            horizontalArrangement=Arrangement.Center) {
+                            AgendaGlyph("ticket", Modifier.size(17.dp), Color.White)
+                            Spacer(Modifier.width(7.dp))
+                            Text("Entrades",color=Color.White,fontSize=13.sp,
+                                fontWeight=FontWeight.SemiBold)
                         }
                     }
-                    HorizontalDivider()
+                }
+                val tabs = if (ev.isFestival) listOf("Horaris", "Info", "Ubicació", "Comunitat")
+                    else listOf("Artistes", "Info", "Ubicació", "Comunitat")
+                Row(Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical=12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    tabs.forEach { name ->
+                        val icon = when(name) { "Artistes" -> "person"; "Horaris" -> "calendar"
+                            "Info" -> "info"; "Ubicació" -> "pin"; else -> "people" }
+                        val active = section == name
+                        Column(Modifier.weight(1f)
+                            .border(1.dp, if(active) AgendaGold else Color(0xFFE4E4E4),RoundedCornerShape(13.dp))
+                            .background(if(active) Color(0xFFFFFAEB) else Color.White,RoundedCornerShape(13.dp))
+                            .clickable { section = name }.padding(vertical=9.dp),
+                            horizontalAlignment=Alignment.CenterHorizontally) {
+                            AgendaGlyph(icon, Modifier.size(17.dp), AgendaGold)
+                            Spacer(Modifier.height(6.dp))
+                            Text(name, fontSize=11.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
                 }
                 Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
                     when (section) {
+                        "Artistes" -> {
+                            Text("Artistes", fontSize=19.sp, fontWeight=FontWeight.Bold,
+                                modifier=Modifier.padding(vertical=10.dp))
+                            ev.artists.ifEmpty { listOf(ev.title) }.distinct().forEach { a ->
+                                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)
+                                    .background(Color(0xFFFAFAFA),RoundedCornerShape(12.dp))
+                                    .padding(10.dp), verticalAlignment=Alignment.CenterVertically) {
+                                    Poster(ev.posterUrl, Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)))
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(a, Modifier.weight(1f).clickable { onArtist(a) },
+                                        fontWeight=FontWeight.SemiBold, fontSize=14.sp,
+                                        maxLines=1, overflow=TextOverflow.Ellipsis)
+                                    TextButton(onClick={ onToggleFollowEntity("ARTIST",a) }) {
+                                        Text(if(followsEntity("ARTIST",a)) "✓ Seguint" else "+ Seguir",
+                                            fontSize=11.sp, color=AgendaBlack)
+                                    }
+                                }
+                            }
+                        }
                         "Info" -> {
                             if (ev.description.isNotBlank()) {
                                 Text("Informació", fontWeight = FontWeight.Bold)
@@ -1526,7 +2044,6 @@ private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: B
                         }
                     }
                 }
-                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End).padding(7.dp)) { Text("Tancar") }
             }
         }
     }
@@ -1539,7 +2056,8 @@ private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: B
 
 @Composable
 private fun ArtistDialog(name: String, followed: Boolean, concerts: List<AgendaEventSummary>,
-                         onFollow: () -> Unit, onDismiss: () -> Unit, onEvent: (AgendaEventSummary) -> Unit) {
+                         onFollow: () -> Unit, bell: IosArtistBell?, onBell: () -> Unit,
+                         onDismiss: () -> Unit, onEvent: (AgendaEventSummary) -> Unit) {
     // Artist search platforms mirror Android, but these are SEARCH links, not claimed official profiles.
     val firstEvent = concerts.firstOrNull()
     val discipline = concerts.map { it.category }.filter(String::isNotBlank)
@@ -1571,7 +2089,10 @@ private fun ArtistDialog(name: String, followed: Boolean, concerts: List<AgendaE
                 Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 5.dp),
                     horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Button(onClick = onFollow) { Text(if (followed) "✓ Seguint" else "+ Seguir") }
-                    TextButton(onClick = onDismiss) { Text("Tancar") }
+                    OutlinedButton(onClick = onBell) {
+                        Text(if (bell != null) "🔔 ${IosArtistBellPolicy.label(bell.frequency)}" else "🔔 Avisos")
+                    }
+                    TextButton(onClick = onDismiss) { Text("×") }
                 }
                 Text(name, fontSize = 22.sp, fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
@@ -1609,127 +2130,327 @@ private fun ArtistDialog(name: String, followed: Boolean, concerts: List<AgendaE
     }
 }
 
-/** Full story navigation. Never invents extra Batecs or turns stories into event cards. */
+/** One independent artist bell per account; never assume push works until APNs is configured. */
 @Composable
-private fun BatecViewer(stories: List<IosBatec>, selectedKey: String,
-                        eventFor: (Int) -> AgendaEventSummary?,
-                        onDismiss: () -> Unit, onOpenEvent: (Int) -> Unit,
-                        onStoryChanged: (IosBatec) -> Unit) {
-    val selectedIndex = stories.indexOfFirst { it.storyKey == selectedKey }.coerceAtLeast(0)
-    val story = stories[selectedIndex]
-    fun go(offset: Int) {
-        val next = IosBatecNavigationPolicy.move(selectedIndex, stories.size, offset)
-        if (next == null) onDismiss() else onStoryChanged(stories[next])
+private fun ArtistBellEditorDialog(artist: String, current: IosArtistBell?,
+        onDismiss: () -> Unit, onSave: (Boolean, String) -> Unit) {
+    var frequency by remember(artist, current?.frequency) { mutableStateOf(current?.frequency ?: "WEEKLY") }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Avisos de $artist") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Avisa'm de noves activitats d'este artista o grup.", fontSize = 13.sp)
+                IosArtistBellPolicy.frequencies.sortedBy { listOf("IMMEDIATE", "DAILY", "WEEKLY").indexOf(it) }
+                    .forEach { value ->
+                        Row(Modifier.fillMaxWidth().clickable { frequency = value },
+                            verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = frequency == value, onClick = { frequency = value })
+                            Text(IosArtistBellPolicy.label(value))
+                        }
+                    }
+                Text("Els avisos fora de l'app requerixen permís iOS i l'emissor APNs del servidor actiu.",
+                    fontSize = 11.sp, color = Color.Gray)
+            }
+        }, confirmButton = {
+            TextButton(onClick = { onSave(true, frequency) }) { Text("Guardar freqüència") }
+        }, dismissButton = {
+            Row {
+                if (current != null) TextButton(onClick = { onSave(false, frequency) }) { Text("Desactivar") }
+                TextButton(onClick = onDismiss) { Text("Cancel·lar") }
+            }
+        })
+}
+
+/** One artist per visual Batec, with stories and current concerts inside its viewer. */
+@Composable
+private fun BatecViewer(
+    groups: List<IosBatecArtistGroup>,
+    selectedKey: String,
+    stories: List<IosBatec>,
+    allEvents: List<AgendaEventSummary>,
+    onDismiss: () -> Unit,
+    onOpenEvent: (Int) -> Unit,
+    onGroupChanged: (IosBatecArtistGroup) -> Unit
+) {
+    val selectedIndex = groups.indexOfFirst { it.key == selectedKey }.coerceAtLeast(0)
+    val group = groups[selectedIndex]
+    val groupKeys = remember(group.storyKeys) { group.storyKeys.toSet() }
+    val groupStories = remember(stories, groupKeys) { stories.filter { it.storyKey in groupKeys } }
+    val representative = groupStories.firstOrNull { it.storyKey == group.openingStoryKey }
+        ?: groupStories.firstOrNull()
+        ?: return
+    val upcoming = remember(allEvents, group.key) {
+        allEvents.asSequence().filter { ev ->
+            (ev.artists.any { it.trim().equals(group.artist.trim(), ignoreCase = true) } ||
+             ev.schedule.any { it.artist.trim().equals(group.artist.trim(), ignoreCase = true) }) &&
+             (ev.endDate.ifBlank { ev.date }.isBlank() || ev.endDate.ifBlank { ev.date } >= currentLocalDateIso())
+        }.distinctBy { it.id }.sortedWith(compareBy<AgendaEventSummary> { it.date }.thenBy { it.time }).take(12).toList()
+    }
+    var replayEpoch by remember(selectedKey) { mutableIntStateOf(0) }
+    var progress by remember(selectedKey, replayEpoch) { mutableFloatStateOf(0f) }
+    fun go(delta: Int) {
+        if (delta < 0 && selectedIndex == 0) {
+            replayEpoch += 1 // Android restarts the first Batec instead of closing.
+        } else {
+            val next = IosBatecNavigationPolicy.move(selectedIndex, groups.size, delta)
+            if (next == null) onDismiss() else onGroupChanged(groups[next])
+        }
+    }
+    LaunchedEffect(selectedKey, replayEpoch) {
+        progress = 0f
+        repeat(150) { step ->
+            kotlinx.coroutines.delay(100)
+            progress = (step + 1) / 150f
+        }
+        go(1) // fifteen seconds, then the next group or close after the last.
     }
     Dialog(onDismissRequest = onDismiss) {
-        Surface(shape = RoundedCornerShape(18.dp), color = Color(0xFF1F1D24),
-            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.87f)) {
-            var horizontalDrag by remember(story.storyKey) { mutableFloatStateOf(0f) }
-            Column(Modifier.fillMaxSize().pointerInput(story.storyKey) {
-                detectHorizontalDragGestures(
-                    onDragStart = { horizontalDrag = 0f },
-                    onDragEnd = {
-                        when {
-                            horizontalDrag < -55f -> go(1)
-                            horizontalDrag > 55f -> go(-1)
+        Surface(
+            shape = RoundedCornerShape(24.dp), color = Color(0xFF1D1921),
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.89f)
+        ) {
+            var horizontalDrag by remember(selectedKey) { mutableFloatStateOf(0f) }
+            Box(
+                Modifier.fillMaxSize()
+                    .pointerInput(selectedKey, groups.size) {
+                        detectTapGestures { p ->
+                            if (p.x < size.width * 0.24f) go(-1)
+                            else if (p.x > size.width * 0.76f) go(1)
                         }
-                        horizontalDrag = 0f
-                    },
-                    onHorizontalDrag = { change, delta -> horizontalDrag += delta; change.consume() }
+                    }
+                    .pointerInput(selectedKey, groups.size) {
+                        detectHorizontalDragGestures(
+                            onDragStart = { horizontalDrag = 0f },
+                            onHorizontalDrag = { change, delta -> horizontalDrag += delta; change.consume() },
+                            onDragEnd = {
+                                when {
+                                    horizontalDrag < -56.dp.toPx() -> go(1)
+                                    horizontalDrag > 56.dp.toPx() -> go(-1)
+                                }
+                                horizontalDrag = 0f
+                            },
+                            onDragCancel = { horizontalDrag = 0f }
+                        )
+                    }
+            ) {
+                Poster(
+                    representative.imageUrl.ifBlank { upcoming.firstOrNull()?.posterUrl.orEmpty() },
+                    Modifier.fillMaxSize()
                 )
-            }) {
-                Row(Modifier.fillMaxWidth().padding(11.dp), horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Text("${selectedIndex + 1} / ${stories.size}", color = Color.White, fontSize = 13.sp)
-                    Text(story.artist, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1,
-                        modifier = Modifier.weight(1f).padding(horizontal = 12.dp))
-                    TextButton(onClick = onDismiss) { Text("✕", color = Color.White) }
-                }
-                Box(Modifier.fillMaxWidth().weight(1f)) {
-                    Poster(story.imageUrl.ifBlank { eventFor(story.eventId)?.posterUrl.orEmpty() }, Modifier.fillMaxSize())
-                }
-                Column(Modifier.padding(12.dp)) {
-                    Text(story.eventTitle.ifBlank { eventFor(story.eventId)?.title.orEmpty() },
-                        color = Color.White, fontWeight = FontWeight.Bold, maxLines = 2)
-                    if (story.text.isNotBlank()) Text(story.text, color = Color.White, fontSize = 13.sp, maxLines = 3)
+                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
+                    Color.Black.copy(alpha = .60f), Color.Black.copy(alpha = .83f),
+                    Color.Black.copy(alpha = .92f)
+                ))))
+                Column(Modifier.fillMaxSize().padding(14.dp)) {
+                    Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(20.dp))
+                        .background(Color.White.copy(alpha = .26f))) {
+                        Box(Modifier.fillMaxHeight().fillMaxWidth(progress.coerceIn(0f, 1f))
+                            .background(Color.White))
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(39.dp).clip(CircleShape).background(Accent)) {
+                            Poster(representative.imageUrl, Modifier.fillMaxSize().clip(CircleShape))
+                        }
+                        Spacer(Modifier.width(9.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(group.artist, color = Color.White, fontWeight = FontWeight.Bold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${group.storyKeys.size} novetat${if (group.storyKeys.size == 1) "" else "s"} · ${selectedIndex + 1}/${groups.size}",
+                                color = Color.White.copy(alpha = .72f), fontSize = 11.sp)
+                        }
+                        TextButton(onClick = onDismiss) { Text("✕", color = Color.White, fontSize = 20.sp) }
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    Text("Pròximes actuacions", color = Color.White.copy(alpha = .8f),
+                        fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Text(group.artist, color = Color.White, fontWeight = FontWeight.Black,
+                        fontSize = 25.sp, maxLines = 2)
+                    Spacer(Modifier.height(14.dp))
+                    LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                        if (upcoming.isNotEmpty()) {
+                            items(upcoming, key = { "batec_concert_${it.id}" }) { ev ->
+                                Row(
+                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                        .background(Color.White.copy(alpha = .15f))
+                                        .clickable { onOpenEvent(ev.id) }.padding(9.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Poster(ev.posterUrl, Modifier.size(56.dp).clip(RoundedCornerShape(7.dp)))
+                                    Spacer(Modifier.width(9.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(ev.title, color = Color.White, fontWeight = FontWeight.Bold,
+                                            fontSize = 13.sp, maxLines = 2)
+                                        Text("${ev.date} ${ev.time} · ${ev.town}", color = Color.White.copy(alpha = .8f),
+                                            fontSize = 11.sp, maxLines = 2)
+                                    }
+                                    Text("›", color = Color.White, fontSize = 27.sp)
+                                }
+                            }
+                        } else {
+                            item {
+                                Text(representative.text.ifBlank { "No hi ha actuacions pròximes disponibles." },
+                                    color = Color.White, fontSize = 15.sp)
+                            }
+                        }
+                    }
+                    if (groupStories.size > 1) {
+                        Text("${groupStories.size} publicacions d’este artista", color = Color.White.copy(alpha = .73f),
+                            fontSize = 11.sp, modifier = Modifier.padding(top = 7.dp))
+                    }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = { go(-1) }, enabled = selectedIndex > 0) { Text("← Anterior") }
-                        if (eventFor(story.eventId) != null) {
-                            TextButton(onClick = { onOpenEvent(story.eventId) }) { Text("Activitat") }
+                        TextButton(onClick = { go(-1) }) { Text("‹ Anterior", color = Color.White) }
+                        TextButton(onClick = { go(1) }) {
+                            Text(if (selectedIndex == groups.lastIndex) "Tancar" else "Següent ›", color = Color.White)
                         }
-                        TextButton(onClick = { go(1) }) { Text(if (selectedIndex == stories.lastIndex) "Tancar" else "Següent →") }
                     }
+                }
+                // Large hit areas stay outside the scrollable concert content.
+                Box(Modifier.align(Alignment.CenterStart).width(35.dp).height(88.dp)
+                    .clickable { go(-1) }, contentAlignment = Alignment.Center) {
+                    Text("‹", color = Color.White, fontSize = 36.sp)
+                }
+                Box(Modifier.align(Alignment.CenterEnd).width(35.dp).height(88.dp)
+                    .clickable { go(1) }, contentAlignment = Alignment.Center) {
+                    Text("›", color = Color.White, fontSize = 36.sp)
                 }
             }
         }
     }
 }
 
+/** Android-equivalent full-width notification sheet; no fabricated notifications. */
 @Composable
-private fun NotificationsDialog(notifications: List<IosNotification>, reminders: List<AgendaEventSummary>,
-                                onDismiss: () -> Unit, onRead: (IosNotification) -> Unit,
-                                onReminderClick: (AgendaEventSummary) -> Unit,
-                                onReminderDisable: (AgendaEventSummary) -> Unit,
-                                reminderTime: (AgendaEventSummary) -> String) {
+private fun NotificationsDialog(
+    notifications: List<IosNotification>,
+    artistBells: List<IosArtistBell>,
+    reminders: List<AgendaEventSummary>,
+    eventsById: Map<Int, AgendaEventSummary>,
+    onDismiss: () -> Unit,
+    onRead: (IosNotification) -> Unit,
+    onReminderClick: (AgendaEventSummary) -> Unit,
+    onReminderDisable: (AgendaEventSummary) -> Unit,
+    onArtistBell: (String) -> Unit,
+    reminderTime: (AgendaEventSummary) -> String
+) {
     var view by remember { mutableStateOf(IosNotificationGrouping.GENERAL) }
-    val tabs = listOf("General" to "♧", "Pròxim" to "◷", "Nous" to "✧", "Entrades" to "▤", "Suggerències" to "✦", "Comunitat" to "♙")
-    val grouped = remember(notifications) { notifications.groupBy { IosNotificationGrouping.fromDeepLinkType(it.linkType) } }
+    val tabs = listOf("General" to "bell", "Pròxim" to "clock", "Nous" to "info",
+        "Entrades" to "ticket", "Suggerències" to "search", "Comunitat" to "people")
+    val grouped = remember(notifications) { notifications.groupBy {
+        IosNotificationGrouping.fromDeepLinkType(it.linkType) } }
     val shown = grouped[view].orEmpty()
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(shape = RoundedCornerShape(20.dp), color = Color.White, modifier = Modifier.fillMaxWidth().fillMaxHeight(0.92f)) {
-            Column(Modifier.padding(12.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("Notificacions", fontSize = 23.sp, fontWeight = FontWeight.Bold)
-                    TextButton(onClick = onDismiss) { Text("✕") }
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    tabs.forEach { (name, symbol) ->
-                        val unread = grouped[name].orEmpty().count { !it.read }
-                        Column(Modifier.weight(1f).clickable { view = name }.background(if (view == name) Accent else Color.White,
-                            RoundedCornerShape(7.dp)).padding(vertical = 7.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(symbol, fontSize = 20.sp)
-                            Text(name.take(4), fontSize = 9.sp)
-                            if (unread > 0) Text(unread.toString(), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+    val pending = notifications.count { !it.read }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+            Surface(color = Color.White, shape = RoundedCornerShape(topStart=21.dp,topEnd=21.dp),
+                modifier = Modifier.fillMaxWidth().fillMaxHeight(0.94f)) {
+                Column {
+                    Row(Modifier.fillMaxWidth().padding(start=18.dp,end=14.dp,top=15.dp,bottom=5.dp),
+                        verticalAlignment=Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Notificacions", fontSize=23.sp,fontWeight=FontWeight.Bold)
+                            Text("$pending sense llegir", fontSize=12.sp, color=Color.Gray)
                         }
+                        AgendaTopAction("clock", onClick={ view="Recordatoris" },
+                            badge=reminders.size+artistBells.size)
+                        AgendaTopAction("sliders", onClick={
+                            IosNativeBridge.current?.showNotificationSettings()
+                        })
+                        AgendaTopAction("close", onClick=onDismiss)
                     }
-                }
-                TextButton(onClick = { view = "Recordatoris" }) { Text("♧ Recordatoris actius (${reminders.size})") }
-                HorizontalDivider()
-                LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(vertical = 7.dp),
-                    verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    if (view == "Recordatoris") {
-                        items(reminders, key = { it.key }) { ev ->
-                            Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Poster(ev.posterUrl, Modifier.size(63.dp).clip(RoundedCornerShape(8.dp)))
-                                Column(Modifier.weight(1f).clickable { onReminderClick(ev) }.padding(8.dp)) {
-                                    Text(ev.title, fontWeight = FontWeight.Bold)
-                                    Text(ev.date, fontSize = 12.sp)
-                                    val whenScheduled = reminderTime(ev)
-                                    if (whenScheduled.isNotBlank()) {
-                                        Text("Avís: ${whenScheduled.replace('T',' ')}", fontSize = 11.sp, color = Color.Gray)
+                    Row(Modifier.fillMaxWidth().padding(horizontal=5.dp,vertical=9.dp)) {
+                        tabs.forEach { (label,symbol) ->
+                            val active = view==label
+                            val unread = grouped[label].orEmpty().count{!it.read}
+                            Column(Modifier.weight(1f).clickable { view=label }
+                                .padding(vertical=7.dp),horizontalAlignment=Alignment.CenterHorizontally) {
+                                Box(contentAlignment=Alignment.TopEnd) {
+                                    AgendaGlyph(symbol,Modifier.size(22.dp),if(active) AgendaBlack else Color(0xFF555555))
+                                    if(unread>0) Box(Modifier.offset(x=8.dp,y=(-5).dp).size(15.dp)
+                                        .background(AgendaBlack,CircleShape), contentAlignment=Alignment.Center) {
+                                        Text(unread.coerceAtMost(9).toString(),color=Color.White,fontSize=8.sp)
                                     }
                                 }
-                                TextButton(onClick = { onReminderDisable(ev) }) { Text("♧", fontSize = 24.sp) }
+                                Spacer(Modifier.height(10.dp))
+                                Box(Modifier.fillMaxWidth().height(2.dp)
+                                    .background(if(active) AgendaBlack else Color.Transparent))
                             }
                         }
-                        if (reminders.isEmpty()) item { EmptyState("No tens recordatoris actius.") }
-                    } else {
-                        items(shown, key = { it.id }) { notice ->
-                            Column(Modifier.fillMaxWidth().clickable { onRead(notice) }.padding(8.dp)) {
-                                Text(notice.title + if (!notice.read) " •" else "", fontWeight = FontWeight.Bold)
-                                Text(notice.body, fontSize = 13.sp)
-                                Text(notice.createdAt, fontSize = 10.sp, color = Color.Gray)
-                                HorizontalDivider()
-                            }
-                        }
-                        if (shown.isEmpty()) item { EmptyState("No hi ha avisos en esta categoria.") }
                     }
-                }
-                // Only mark messages displayed in the selected category, never hidden categories.
-                if (view != "Recordatoris" && shown.any { !it.read }) {
-                    TextButton(onClick = { shown.filterNot { it.read }.forEach(onRead) }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Marcar esta categoria com a llegida")
+                    Text(view, modifier=Modifier.fillMaxWidth().padding(vertical=7.dp),
+                        textAlign=androidx.compose.ui.text.style.TextAlign.Center,
+                        fontSize=12.sp, fontWeight=FontWeight.SemiBold)
+                    LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(horizontal=10.dp,vertical=6.dp),
+                        verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                        if (view == "Recordatoris") {
+                            items(reminders,key={"rem_${it.id}"}) { ev ->
+                                Row(Modifier.fillMaxWidth().background(AgendaChrome,RoundedCornerShape(13.dp))
+                                    .padding(10.dp),verticalAlignment=Alignment.CenterVertically) {
+                                    Poster(ev.posterUrl,Modifier.size(width=65.dp,height=78.dp)
+                                        .clip(RoundedCornerShape(9.dp)))
+                                    Column(Modifier.weight(1f).clickable{onReminderClick(ev)}
+                                        .padding(start=10.dp)) {
+                                        Text(ev.title,fontWeight=FontWeight.Bold,fontSize=14.sp,maxLines=2)
+                                        Text("${ev.town} · ${ev.venue}",fontSize=11.sp,maxLines=1,color=Color.Gray)
+                                        Text(reminderTime(ev).replace('T',' '),fontSize=11.sp)
+                                    }
+                                    AgendaTopAction("bell",onClick={onReminderDisable(ev)})
+                                }
+                            }
+                            items(artistBells,key={"bell_"+IosArtistBellPolicy.key(it.artistName)}) { item ->
+                                Row(Modifier.fillMaxWidth().background(AgendaChrome,RoundedCornerShape(13.dp))
+                                    .clickable{onArtistBell(item.artistName)}.padding(15.dp),
+                                    verticalAlignment=Alignment.CenterVertically) {
+                                    Text(item.artistName,Modifier.weight(1f),fontWeight=FontWeight.Bold)
+                                    Text(IosArtistBellPolicy.label(item.frequency),fontSize=12.sp)
+                                    AgendaGlyph("bell",Modifier.size(20.dp))
+                                }
+                            }
+                            if(reminders.isEmpty() && artistBells.isEmpty()) item {
+                                EmptyState("No tens recordatoris actius.")
+                            }
+                        } else {
+                            items(shown,key={it.id}) { notice ->
+                                val ev = eventsById[notice.linkValue.toIntOrNull()]
+                                    ?: eventsById.values.firstOrNull { it.title.equals(notice.title,ignoreCase=true) }
+                                Row(Modifier.fillMaxWidth()
+                                    .background(if(notice.read) Color(0xFFF6F6F6) else AgendaChrome,
+                                        RoundedCornerShape(13.dp))
+                                    .clickable{onRead(notice)}.padding(10.dp),
+                                    verticalAlignment=Alignment.CenterVertically) {
+                                    if(ev != null) Poster(ev.posterUrl,
+                                        Modifier.width(65.dp).height(79.dp).clip(RoundedCornerShape(9.dp)))
+                                    else Box(Modifier.size(65.dp).background(Color.White,RoundedCornerShape(9.dp)),
+                                        contentAlignment=Alignment.Center) {
+                                        AgendaGlyph("bell",Modifier.size(24.dp))
+                                    }
+                                    Spacer(Modifier.width(11.dp))
+                                    Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                                        Text(notice.title,maxLines=2,overflow=TextOverflow.Ellipsis,
+                                            fontSize=14.sp,fontWeight=FontWeight.SemiBold)
+                                        Text(if(ev==null) notice.body else listOf(ev.town,ev.venue)
+                                            .filter(String::isNotBlank).joinToString(" · "),
+                                            maxLines=2,overflow=TextOverflow.Ellipsis,
+                                            fontSize=12.sp,color=Color.DarkGray)
+                                        Text(if(ev != null) listOf(ev.date,ev.time,
+                                            IosUnfilteredFeedPolicy.ticketLabel(ev.ticketAvailable,ev.price))
+                                            .filter(String::isNotBlank).joinToString(" · ") else notice.createdAt,
+                                            fontSize=11.sp,color=AgendaBlack)
+                                    }
+                                    if(!notice.read) Box(Modifier.align(Alignment.Top).size(7.dp)
+                                        .background(AgendaBlack,CircleShape))
+                                }
+                            }
+                            if(shown.isEmpty()) item { EmptyState("No hi ha avisos en esta categoria.") }
+                        }
+                    }
+                    if(view != "Recordatoris" && shown.any{!it.read}) {
+                        Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement=Arrangement.End) {
+                            OutlinedButton(onClick={ shown.filterNot{it.read}.forEach(onRead) }) {
+                                Text("Marcar com a llegides",fontSize=12.sp)
+                            }
+                        }
                     }
                 }
             }
@@ -1878,6 +2599,10 @@ private fun CreateGroupDialog(event: AgendaEventSummary, api: IosAgendaApi, onDi
     var title by remember { mutableStateOf("") }
     var kind by remember { mutableStateOf("OTHER") }
     var open by remember { mutableStateOf(true) }
+    var description by remember { mutableStateOf("") }
+    var origin by remember { mutableStateOf("") }
+    var meetingAt by remember { mutableStateOf("") }
+    var capacity by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     AlertDialog(onDismissRequest = onDismiss,
         title = { Text("Crear tauló") },
@@ -1886,18 +2611,22 @@ private fun CreateGroupDialog(event: AgendaEventSummary, api: IosAgendaApi, onDi
             OutlinedTextField(title, { title = it.take(160) }, label = { Text("Nom del tauló") })
             Text("Tipus de tauló", fontSize = 13.sp, fontWeight = FontWeight.Bold)
             listOf("CAR" to "Cotxe compartit", "TRANSPORT" to "Transport organitzat",
-                "MEETUP" to "Quedades", "OTHER" to "Altres (inclou allotjament)").forEach { (key, label) ->
+                "MEETUP" to "Quedades", "HOSTING" to "Allotjament compartit", "OTHER" to "Altres").forEach { (key, label) ->
                 Row(Modifier.fillMaxWidth().clickable { kind = key }, verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(selected = kind == key, onClick = { kind = key })
                     Text(label, fontSize = 12.sp)
                 }
             }
+            OutlinedTextField(description, { description = it.take(1000) }, label = { Text("Descripció") })
+            OutlinedTextField(origin, { origin = it.take(190) }, label = { Text("Origen o lloc") })
+            OutlinedTextField(meetingAt, { meetingAt = it.take(19) }, label = { Text("Data i hora AAAA-MM-DD HH:MM") })
+            OutlinedTextField(capacity, { capacity = it.filter(Char::isDigit).take(3) }, label = { Text("Places disponibles") })
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(open, onCheckedChange = { open = it }); Text("Obert (sense aprovació)", fontSize = 12.sp)
             }
         } },
         confirmButton = { TextButton(enabled = !busy && title.isNotBlank(), onClick = { busy = true; scope.launch {
-            try { api.createCommunityGroup(event.id, title, kind, open); onCreated() }
+            try { api.createCommunityGroup(event.id, title, kind, open, description, origin, meetingAt, capacity.toIntOrNull() ?: 0); onCreated() }
             catch (ex: Exception) { onError(ex.message ?: "Error creant el tauló") }
             finally { busy = false }
         } }) { Text("Crear") } },
@@ -2118,4 +2847,46 @@ private fun ProfileSettingsEditor(current: IosProfileSettings, onDismiss: () -> 
             }
         }
     }
+}
+
+
+@Composable
+private fun ProfileEditIosDialog(current: IosMyProfile, onDismiss: () -> Unit,
+                                 onPickImage: () -> Unit, onSave: (String, String, Boolean) -> Unit) {
+    var name by remember(current.displayName) { mutableStateOf(current.displayName) }
+    var bio by remember(current.bio) { mutableStateOf(current.bio) }
+    var remove by remember { mutableStateOf(false) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Editar perfil") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            if (current.photoUrl.isNotBlank() && !remove) {
+                AsyncImage(model = current.photoUrl, contentDescription = "Foto actual", modifier = Modifier.size(90.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+            }
+            OutlinedButton(onClick = onPickImage) { Text("Triar fotografia de Fotos") }
+            if (current.photoUrl.isNotBlank()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = remove, onCheckedChange = { remove = it })
+                    Text("Llevar la fotografia actual")
+                }
+            }
+            OutlinedTextField(name, { name = it.take(190) }, label = { Text("Nom i cognoms") }, singleLine = true)
+            OutlinedTextField(bio, { bio = it.take(3000) }, label = { Text("Biografia") }, minLines = 2, maxLines = 4)
+            Text("La fotografia es guarda al servidor, igual que en Android.", fontSize = 11.sp, color = Color.Gray)
+        } },
+        confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { onSave(name, bio, remove) }) { Text("Guardar") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel·lar") } })
+}
+
+@Composable
+private fun DeleteAccountIosDialog(onDismiss: () -> Unit, onDelete: (String, String) -> Unit) {
+    var phrase by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Eliminar el meu compte") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Text("Esta operació desactiva definitivament l'accés, revoca totes les sessions i retira dades personals. Les operacions econòmiques que s'hagen de conservar legalment no es poden eliminar immediatament.", fontSize = 13.sp)
+            OutlinedTextField(phrase, { phrase = it.take(20) }, label = { Text("Escriu ELIMINAR") }, singleLine = true)
+            OutlinedTextField(password, { password = it }, label = { Text("Contrasenya (si tens accés amb contrasenya)") },
+                singleLine = true, visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation())
+        } },
+        confirmButton = { TextButton(enabled = phrase == "ELIMINAR", onClick = { onDelete(phrase, password) }) { Text("Eliminar definitivament") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel·lar") } })
 }

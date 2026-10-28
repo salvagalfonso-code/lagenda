@@ -16,7 +16,6 @@ kotlin {
     }
     iosArm64()
     iosSimulatorArm64()
-    // Compose Multiplatform 1.12.2 no publica artefactes per a ios_x64.
 
     targets.withType<org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget>().configureEach {
         binaries.framework {
@@ -31,6 +30,7 @@ kotlin {
             implementation(compose.foundation)
             implementation(compose.material3)
             implementation(compose.ui)
+            implementation(compose.components.resources)
             implementation("io.ktor:ktor-client-core:3.6.0")
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
             implementation("io.coil-kt.coil3:coil-compose:3.6.3")
@@ -44,4 +44,9 @@ kotlin {
         }
         commonTest.dependencies { implementation(kotlin("test")) }
     }
+}
+
+compose.resources {
+    publicResClass = true
+    packageOfResClass = "com.example.agendavalenciana.ios.resources"
 }
