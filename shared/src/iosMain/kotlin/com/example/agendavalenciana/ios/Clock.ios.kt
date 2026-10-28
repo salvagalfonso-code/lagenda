@@ -2,7 +2,6 @@ package com.example.agendavalenciana.ios
 
 import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
-import platform.Foundation.NSTimeZone
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -10,7 +9,6 @@ import kotlin.coroutines.resume
 actual fun currentEpochMillis(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
 actual fun currentLocalDateIso(): String = NSDateFormatter().apply {
     dateFormat = "yyyy-MM-dd"
-    timeZone = NSTimeZone(name = "Europe/Madrid")
 }.stringFromDate(NSDate())
 
 actual fun platformReadPublicCache(key: String): String =
