@@ -14,4 +14,6 @@
 <key>LSRequiresIPhoneOS</key><true/>
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
 <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
+<key>CADisableMinimumFrameDurationOnPhone</key>
+<true/>
 </dict></plist>
