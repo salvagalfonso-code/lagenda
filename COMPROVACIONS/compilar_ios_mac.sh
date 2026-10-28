@@ -16,5 +16,5 @@ sh ./gradlew ":shared:$TARGET" --stacktrace
 printf '\n2/2: Compilant aplicació per al simulador iOS\n'
 xcodebuild -project iosApp/AgendaIOS.xcodeproj -scheme AgendaIOS \
   -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
-  CODE_SIGNING_ALLOWED=NO build
+  ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
 printf '\nCompilació iOS per al simulador completada.\n'
