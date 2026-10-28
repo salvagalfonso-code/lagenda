@@ -1,3 +1,35 @@
+workflows:
+  lagenda-ios-simulator:
+    name: L'Agenda - iPhone virtual
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Diagnosticar els projectes iOS
+        script: |
+          echo '===== ARXIUS XCODE ====='
+          find . -maxdepth 6 -type d \( -name '*.xcodeproj' -o -name '*.xcworkspace' \) \
+            -not -path '*/node_modules/*' -not -path '*/Pods/*' -not -path '*/.git/*' -print || true
+          echo '===== ESQUEMES COMPARTITS ====='
+          find . -maxdepth 8 -type f -name '*.xcscheme' \
+            -not -path '*/node_modules/*' -not -path '*/Pods/*' -not -path '*/.git/*' -print || true
+          echo '===== PROJECTES NATIUS iOS ====='
+          find . -maxdepth 8 -type f -name 'project.pbxproj' \
+            -not -path '*/node_modules/*' -not -path '*/Pods/*' -not -path '*/.git/*' -print || true
+
+      - name: Preparar dependències
+        script: |
+          set -eu
+          if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
+          if [ -f pubspec.yaml ]; then flutter pub get; fi
+          if [ -f package.json ]; then
+            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          fi
+          for path in ios/Podfile iosApp/Podfile Podfile; do
+            if [ -f "$path" ]; then
+              (cd "$(dirname "$path")" && pod install)
             fi
           done
 
@@ -62,49 +94,3 @@
               for scheme in schemes:
                   # Preferim el projecte si el workspace es orfe o no te un esquema real.
                   matched = any(p.parent == ws.parent and p.stem == ws.stem for p in projects)
-                  if matched:
-                      choices.append(((0,) + rank(ws), '-workspace', ws, '-scheme', scheme))
-
-          if not choices:
-              print('\nERROR: No hi ha cap projecte Xcode compilable amb schemes o targets.', flush=True)
-              print('El fitxer project.xcworkspace per si sol NO demostra que existisca una app iOS.', flush=True)
-              print('Cal un .xcodeproj amb project.pbxproj i un target d\'aplicacio iPhone.', flush=True)
-              sys.exit(1)
-
-          def choice_rank(entry):
-              _, kind, path, selector, name = entry
-              preferred_name = name.lower().replace(' ', '')
-              score = preferred.index(preferred_name) if preferred_name in preferred else len(preferred)
-              return (0 if selector == '-scheme' else 1, score, rank(path))
-
-          _, kind, path, selector, name = sorted(choices, key=choice_rank)[0]
-          print(f'COMPILANT: {path.relative_to(root)} / {selector} {name}', flush=True)
-          out = root / 'ios-build'
-          out.mkdir(exist_ok=True)
-          command = ['xcodebuild', 'build', kind, str(path), selector, name,
-                     '-configuration', 'Debug', '-sdk', 'iphonesimulator',
-                     'CODE_SIGNING_ALLOWED=NO', 'CODE_SIGNING_REQUIRED=NO']
-          if selector == '-scheme':
-              command += ['-destination', 'generic/platform=iOS Simulator',
-                          '-derivedDataPath', str(out / 'DerivedData')]
-          else:
-              command += [f'CONFIGURATION_BUILD_DIR={out}/Debug-iphonesimulator']
-          raise SystemExit(subprocess.call(command))
-          PY
-
-      - name: Preparar el ZIP per a Appetize
-        script: |
-          set -eu
-          APP=$(find ios-build -type d -name '*.app' -print -quit)
-          if [ -z "$APP" ]; then
-            echo 'ERROR: la compilacio no ha generat cap aplicacio .app.'
-            exit 1
-          fi
-          mkdir -p artifacts
-          ditto -c -k --keepParent "$APP" artifacts/lagenda-ios-simulator.zip
-          echo 'Aplicacio preparada: artifacts/lagenda-ios-simulator.zip'
-
-    artifacts:
-      - artifacts/lagenda-ios-simulator.zip
-      - ios-build/**/*.app
-      - /tmp/xcodebuild_logs/*.log
