@@ -388,6 +388,18 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
         }, authenticated = true)
         else request("notifications/read.php", buildJsonObject { put("id", id) }, authenticated = true)
     }
+    /** Entrades del compte autenticat; mateix endpoint que Android (fetchMyTickets). */
+    suspend fun tickets(): List<IosTicket> =
+        request("tickets/mine.php", authenticated = true).items("tickets").map { ticket ->
+            IosTicket(
+                id = ticket.text("id"),
+                eventId = ticket.text("event_id"),
+                eventTitle = ticket.text("event_title", "title"),
+                status = ticket.text("status"),
+                code = ticket.text("code")
+            )
+        }
+
     suspend fun ticketOptions(eventId: Int): List<IosTicketOption> =
         request("tickets/options.php?event_id=$eventId").items("options").map { option ->
             IosTicketOption(
@@ -531,7 +543,11 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
                     validMediaUrl(it.text("image_url", "media_url")),
                     it.text("story_key").ifBlank { "manual:$id" })
             }
-            items.forEach { if (it.storyKey.isNotBlank()) collected.putIfAbsent(it.storyKey, it) }
+            items.forEach { item ->
+                if (item.storyKey.isNotBlank() && !collected.containsKey(item.storyKey)) {
+                    collected[item.storyKey] = item
+                }
+            }
             val covered = collected.values.map { it.artist.trim().lowercase() }.filter { it in followed }.distinct().size
             if (!root.bool("has_more") || items.isEmpty() || (followed.isNotEmpty() && covered >= 6))
                 return collected.values.toList()

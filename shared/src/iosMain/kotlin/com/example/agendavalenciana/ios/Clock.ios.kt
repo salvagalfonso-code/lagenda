@@ -2,15 +2,15 @@ package com.example.agendavalenciana.ios
 
 import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
-import platform.Foundation.NSTimeZone
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 // Clock és multiplataforma i evita l'accés Objective-C que falla en Kotlin/Native 2.4.
 actual fun currentEpochMillis(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
+// NSDateFormatter usa la zona horària local del dispositiu per defecte.
+// Evita constructors Objective-C NSTimeZone no disponibles en Kotlin/Native.
 actual fun currentLocalDateIso(): String = NSDateFormatter().apply {
     dateFormat = "yyyy-MM-dd"
-    timeZone = NSTimeZone(name = "Europe/Madrid")
 }.stringFromDate(NSDate())
 
 actual fun platformReadPublicCache(key: String): String =
