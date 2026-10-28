@@ -16,7 +16,7 @@ kotlin {
     }
     iosArm64()
     iosSimulatorArm64()
-    iosX64() // Simuladors de Macs Intel; Apple Silicon utilitza iosSimulatorArm64.
+    // Compose Multiplatform 1.12.2 no publica artefactes per a ios_x64.
 
     targets.withType<org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget>().configureEach {
         binaries.framework {

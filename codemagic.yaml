@@ -1,6 +1,6 @@
 workflows:
   lagenda-ios-projecte-complet:
-    name: "L'Agenda - iPhone PROJECTE COMPLET"
+    name: "L'Agenda - iPhone ARM64 (corregit)"
     instance_type: mac_mini_m2
     max_build_duration: 120
     environment:
@@ -26,10 +26,14 @@ workflows:
           test -d shared || { echo "ERROR: Falta la carpeta shared a l'arrel"; exit 1; }
           test -f settings.gradle.kts || { echo "ERROR: Falta settings.gradle.kts a l'arrel"; exit 1; }
           chmod +x gradlew
+          if grep -Eq "^[[:space:]]*iosX64\(" shared/build.gradle.kts; then
+            echo "ERROR: iosX64() encara esta activat i Compose 1.12.2 no el suporta"
+            exit 1
+          fi
           xcodebuild -list -project iosApp/AgendaIOS.xcodeproj
           echo "OK: projecte i esquema a la ruta correcta"
 
-      - name: "2 - Compilar realment AgendaIOS per al simulador"
+      - name: "2 - Compilar AgendaIOS per a simulador ARM64"
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
@@ -39,7 +43,7 @@ workflows:
             -scheme AgendaIOS \
             -configuration Debug \
             -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
+            -arch arm64 \
             -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
