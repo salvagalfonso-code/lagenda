@@ -8,26 +8,28 @@ workflows:
       java: 17
 
     scripts:
-      - name: "1 - Comprovar fitxers d'iOS i Kotlin"
+      - name: "1 - Comprovar estructura iOS i Kotlin"
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
-          echo "=== L'AGENDA: COMPROVACIO ==="
-          for FILE in iosApp/AgendaIOS.xcodeproj/project.pbxproj iosApp/AgendaIOS.xcodeproj/xcshareddata/xcschemes/AgendaIOS.xcscheme gradlew settings.gradle.kts; do
-            if [ ! -f "$FILE" ]; then
-              echo "ERROR: Falta $FILE al repositori. Has de pujar el contingut del ZIP complet, no nomes AgendaIOS.xcodeproj."
-              exit 1
-            fi
-          done
-          if [ ! -d shared ]; then
-            echo "ERROR: Falta la carpeta shared al repositori."
+          echo "=== LAGENDA PROJECTE COMPLET ==="
+          echo "Repositorio: $CM_BUILD_DIR"
+          test -f iosApp/AgendaIOS.xcodeproj/project.pbxproj || {
+            echo "ERROR: Falta iosApp/AgendaIOS.xcodeproj/project.pbxproj al repositori"
             exit 1
-          fi
+          }
+          test -f iosApp/AgendaIOS.xcodeproj/xcshareddata/xcschemes/AgendaIOS.xcscheme || {
+            echo "ERROR: Falta iosApp/AgendaIOS.xcodeproj/xcshareddata/xcschemes/AgendaIOS.xcscheme"
+            exit 1
+          }
+          test -f gradlew || { echo "ERROR: Falta gradlew a l'arrel"; exit 1; }
+          test -d shared || { echo "ERROR: Falta la carpeta shared a l'arrel"; exit 1; }
+          test -f settings.gradle.kts || { echo "ERROR: Falta settings.gradle.kts a l'arrel"; exit 1; }
           chmod +x gradlew
           xcodebuild -list -project iosApp/AgendaIOS.xcodeproj
-          echo "OK: projecte iOS, esquema i estructura Kotlin detectats"
+          echo "OK: projecte i esquema a la ruta correcta"
 
-      - name: "2 - Compilar L'Agenda per a simulador iPhone"
+      - name: "2 - Compilar realment AgendaIOS per al simulador"
         script: |
           set -euo pipefail
           cd "$CM_BUILD_DIR"
@@ -39,23 +41,19 @@ workflows:
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
             2>&1 | tee "$CM_BUILD_DIR/artifacts/xcodebuild.log"
 
-      - name: "3 - Crear ZIP per a Appetize"
+      - name: "3 - Generar ZIP per a Appetize"
         script: |
           set -euo pipefail
           APP="$CM_BUILD_DIR/DerivedData/Build/Products/Debug-iphonesimulator/AgendaIOS.app"
-          if [ ! -d "$APP" ]; then
-            echo "ERROR: No s'ha generat AgendaIOS.app"
-            exit 1
-          fi
+          test -d "$APP" || { echo "ERROR: No s'ha generat AgendaIOS.app"; exit 1; }
           mkdir -p "$CM_BUILD_DIR/artifacts"
           ditto -c -k --keepParent "$APP" "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
           test -s "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
-          echo "OK: lagenda-ios-simulator.zip generat"
+          echo "OK: artifacts/lagenda-ios-simulator.zip generat"
 
     artifacts:
       - artifacts/lagenda-ios-simulator.zip

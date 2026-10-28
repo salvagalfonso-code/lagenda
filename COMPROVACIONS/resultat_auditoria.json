@@ -1,0 +1,10 @@
+{
+  "inspected_files": 194,
+  "checks_passed": 33,
+  "failures": [],
+  "warnings": [],
+  "limitations": [
+    "Sense Mac/Xcode no es pot compilar Kotlin/Native ni verificar APIs iOS enllaçades",
+    "No es pot verificar si GitHub conte exactament esta versio sense descarregar el repositori actual"
+  ]
+}

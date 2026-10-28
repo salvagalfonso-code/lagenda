@@ -1,0 +1,20 @@
+L'AGENDA — CORRECCIO ERRORS KOTLIN/IOS (28-10-2026)
+
+Els dos fitxers corregits son:
+  shared/src/commonMain/kotlin/com/example/agendavalenciana/ios/IosForYouSnapshot.kt
+  shared/src/iosMain/kotlin/com/example/agendavalenciana/ios/Clock.ios.kt
+
+Canvis:
+- El bucle d'estils ara evita desestructuracio i lambdes imbricades.
+- currentEpochMillis usa kotlin.time.Clock.System.now().toEpochMilliseconds() (Kotlin 2.4.20).
+- La zona horaria Europe/Madrid s'obte amb NSTimeZone(name = ...).
+
+INSTAL·LACIO AMB GITHUB DESKTOP
+1. Descomprimix aquest ZIP.
+2. En GitHub Desktop, Repository > Show in Explorer.
+3. Copia la carpeta shared del ZIP descomprimit al repositori 'lagenda' i accepta substituir els 2 fitxers.
+4. En GitHub Desktop, Commit to main i Push origin.
+5. Torna a Codemagic i recompila el mateix workflow.
+
+IMPORTANT: La compilacio iOS real NO esta verificada en aquest entorn.
+Si falla, obri el registre complet, busca totes les linies "error:" i copia-les.

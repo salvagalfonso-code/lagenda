@@ -1,0 +1,18 @@
+L’AGENDA — CORRECCIO DEL COMPILADOR KOTLIN/IOS
+
+Error resolt:
+shared/src/commonMain/kotlin/com/example/agendavalenciana/ios/IosForYouSnapshot.kt:25:56
+Operator call component2() is ambiguous
+
+Aquest ZIP conté un únic fitxer per substituir, amb la mateixa ruta relativa del repositori GitHub.
+
+Instruccions:
+1. Extrau el ZIP.
+2. Copia la carpeta «shared» dins de la carpeta del repositori «lagenda».
+3. Accepta substituir IosForYouSnapshot.kt.
+4. Fes Commit to main i Push origin des de GitHub Desktop.
+5. Comprova que al fitxer de GitHub hi ha «for (townName: String in radii.keys.sorted())».
+6. Torna a compilar amb Codemagic.
+
+No substituïsques Clock.ios.kt ni codemagic.yaml.
+La compilacio iOS real encara no està verificada.
