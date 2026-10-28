@@ -22,10 +22,20 @@ object IosForYouSnapshot {
             append('|'); subcategories.sorted().forEach { append(it); append(';') }
             append('|'); towns.sorted().forEach { append(it); append(';') }
             append('|'); comarques.sorted().forEach { append(it); append(';') }
-            append('|'); radii.toSortedMap().forEach { (k,v) -> append(k); append(':'); append(v); append(';') }
+            append('|')
+            // Kotlin Multiplatform: toSortedMap() només existeix en JVM.
+            // Ordenar les entrades conserva la mateixa signatura sense API JVM.
+            for (entry in radii.entries.sortedBy { it.key }) {
+                append(entry.key); append(':'); append(entry.value); append(';')
+            }
             append('|'); append(suggestions); append(':'); append(discovery.name); append(':'); append(valencianFirst)
-            append('|'); entityStyles.toSortedMap().forEach { (name,codes) ->
-                append(name); append('='); codes.sorted().forEach { append(it); append(',') }; append(';')
+            append('|')
+            for (entry in entityStyles.entries.sortedBy { it.key }) {
+                append(entry.key); append('=')
+                for (code in entry.value.sorted()) {
+                    append(code); append(',')
+                }
+                append(';')
             }
             append('|'); paid.guaranteedEventIds.sorted().forEach { append(it); append(';') }
             append('|'); paid.ads.forEach { append(it.id); append(';') }
