@@ -10,37 +10,47 @@ data class IosBatecArtistGroup(
 )
 
 object IosBatecArtistGroups {
-    private val storyKeyPattern = Regex("(?:manual|event):\\d+")
-    private fun normal(value: String) = value.trim().lowercase()
+    private fun normal(value: String) = IosBatecTimelinePolicy.normal(value)
 
-    /** Six different followed artists are required; no fake stories or unfollowed filler. */
+    /** Android parity: seven followed artists enable six circles; grey placeholders are explicit. */
     fun select(
         candidates: List<BatecCandidate>,
         followedArtists: Set<String>,
         seen: Set<String>,
-        minimumArtists: Int = 6
+        nowMillis: Long = 0L,
+        minimumFollowedArtists: Int = 7
     ): List<IosBatecArtistGroup> {
         val followed = followedArtists.map(::normal).filter(String::isNotBlank).toSet()
-        if (followed.isEmpty()) return emptyList()
+        if (followed.size < minimumFollowedArtists) return emptyList()
         val grouped = linkedMapOf<String, MutableList<BatecCandidate>>()
         val uniqueStoryKeys = hashSetOf<String>()
         candidates.forEach { candidate ->
             val artistKey = normal(candidate.artist)
-            if (candidate.storyKey.matches(storyKeyPattern) &&
+            if (IosBatecTimelinePolicy.isBatecKey(candidate.storyKey) &&
                 artistKey in followed && uniqueStoryKeys.add(candidate.storyKey)) {
                 grouped.getOrPut(artistKey) { mutableListOf() }.add(candidate)
             }
         }
-        if (grouped.size < minimumArtists) return emptyList()
-        return grouped.map { (artistKey, items) ->
+        if (grouped.size < 6) return emptyList()
+        val ranked = grouped.map { (artistKey, items) ->
             val keys = items.map { it.storyKey }
-            IosBatecArtistGroup(
+            val unseen = items.filter { candidate ->
+                !candidate.isPlaceholder && candidate.storyKey !in seen &&
+                    IosBatecTimelinePolicy.recent(candidate.publishedAtMillis, nowMillis)
+            }
+            val mostRecent = items.maxOfOrNull { it.publishedAtMillis } ?: 0L
+            val newestUnseen = unseen.maxOfOrNull { it.publishedAtMillis } ?: 0L
+            val result = IosBatecArtistGroup(
                 key = artistKey,
                 artist = items.first().artist,
                 storyKeys = keys,
-                openingStoryKey = keys.firstOrNull { it !in seen } ?: keys.first(),
-                allSeen = keys.all { it in seen }
+                openingStoryKey = unseen.firstOrNull()?.storyKey ?: keys.first(),
+                allSeen = unseen.isEmpty()
             )
+            Triple(result, newestUnseen, mostRecent)
         }
+        return ranked.sortedWith(compareByDescending<Triple<IosBatecArtistGroup, Long, Long>> { it.second > 0L }
+            .thenByDescending { it.second }.thenByDescending { it.third }.thenBy { it.first.key })
+            .take(6).map { it.first }
     }
 }

@@ -44,7 +44,9 @@ object IosEntityAffinityCatalog {
         val age = currentEpochMillis() - updated
         if (!force && age in 0 until TTL && old.isNotEmpty()) return old
         return runCatching {
-            val incoming = decodeResponse(api.entityStyles())
+            val response = api.entityStyles()
+            IosPersonalizationImages.ingest(response)
+            val incoming = decodeResponse(response)
             if (incoming.isEmpty()) return@runCatching old
             snapshot = incoming
             updated = currentEpochMillis()

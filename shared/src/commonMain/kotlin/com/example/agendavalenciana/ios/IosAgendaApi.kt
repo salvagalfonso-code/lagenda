@@ -7,7 +7,10 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.*
 import kotlinx.serialization.json.*
 import com.example.agendavalenciana.model.IosSavedListInvitation
+import com.example.agendavalenciana.model.IosProfileParityPolicy
 import com.example.agendavalenciana.model.IosAdminPermissions
+import com.example.agendavalenciana.model.IosBatecTime
+import com.example.agendavalenciana.model.IosBatecTimelinePolicy
 
 /** API contract backed by the PHP endpoints bundled with the v336 server snapshot. */
 interface IosSessionBridge {
@@ -19,6 +22,8 @@ interface IosSessionBridge {
     fun writeCache(key: String, value: String)
     fun scheduleLocalReminderConfirmed(userId: Int, eventId: Int, title: String, isoDate: String, callback: IosReminderSchedulingCallback)
     fun cancelLocalReminder(userId: Int, eventId: Int)
+    /** On logout, prevent reminders from a previous account from appearing on this phone. */
+    fun cancelAllLocalReminders(userId: Int)
     /** Shows a QR using the exact issued ticket code; never manufactures a new code. */
     fun showTicketQr(code: String, title: String)
     /** Opens AVFoundation QR scanner; scanned codes are validated only by the server. */
@@ -50,7 +55,10 @@ interface IosReminderSchedulingCallback {
 }
 
 /** A tapped APNs artist alert opens the corresponding artist popup, including when resumed. */
-interface IosPushOpenCallback { fun onOpenArtist(artist: String) }
+interface IosPushOpenCallback {
+    fun onOpenArtist(artist: String)
+    fun onOpenEvent(eventId: Int)
+}
 
 /** The iOS bridge is installed before any Compose state is restored. */
 object IosNativeBridge {
@@ -150,6 +158,38 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
         sessionBridge?.saveToken(newToken)
         account = result
         return result
+    }
+
+    /** Android uses account/update.php to change username and email; the server returns the authoritative identity. */
+    suspend fun updateMyAccountIdentity(username: String, email: String): IosAccount {
+        val existing = account ?: error("Cal iniciar sessió.")
+        val cleanName = username.trim()
+        val cleanEmail = email.trim()
+        require(IosProfileParityPolicy.validUsername(cleanName)) { "El nom d'usuari ha de tindre entre 3 i 80 caràcters." }
+        require(IosProfileParityPolicy.validEmail(cleanEmail)) { "Introduïx un correu electrònic vàlid." }
+        // Android passes the current home_town, not a guessed new value. iOS fetches it
+        // from the user's public profile before this POST, keeping it unchanged.
+        val profile = request("account/profile-ios.php", authenticated = true)["profile"] as? JsonObject
+        // Never erase a user's saved town if an older server still omits this field.
+        require(profile != null && "home_town" in profile) {
+            "Cal actualitzar l'endpoint de perfil al servidor abans de canviar usuari o correu."
+        }
+        val homeTown = profile.text("home_town")
+        val result = request("account/update.php", buildJsonObject {
+            put("username", cleanName)
+            put("email", cleanEmail)
+            put("home_town", homeTown)
+        }, authenticated = true)
+        val user = result["user"] as? JsonObject ?: error("El servidor no ha retornat el compte actualitzat.")
+        val updated = existing.copy(username = user.text("username"), email = user.text("email"), role = user.text("role").ifBlank { existing.role })
+        require(updated.username.isNotBlank()) { "El servidor ha retornat un nom d'usuari buit." }
+        account = updated
+        return updated
+    }
+
+    /** Same route as Android's sendWelcomeVerificationEmail. */
+    suspend fun sendMyEmailVerification() {
+        request("mail/welcome.php", buildJsonObject {}, authenticated = true)
     }
 
     suspend fun myPublicProfile(): IosMyProfile {
@@ -287,26 +327,67 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
     }
     suspend fun leaveSavedList(id: Int) { listOperation("leave_list", listId = id) }
 
-    /** Named search filters live on the authenticated server account, not just this device. */
+    /** Android-compatible full criteria; nothing is marked saved before the server confirms. */
     suspend fun savedSearches(): List<IosSavedSearch> =
-        request("preferences/search-filters.php", authenticated = true).items("presets").mapNotNull { item ->
-            val name = item.text("name").takeIf(String::isNotBlank) ?: return@mapNotNull null
-            val filter = item["filters"] as? JsonObject ?: return@mapNotNull null
-            IosSavedSearch(name, filter.text("town"), filter.names("categories"))
+        request("preferences/search-filters.php", authenticated = true).items("presets").mapNotNull { row ->
+            val name = row.text("name").takeIf(String::isNotBlank) ?: return@mapNotNull null
+            val saved = row["filters"] as? JsonObject ?: return@mapNotNull null
+            IosSavedSearch(name, decodeIosSavedFilters(saved))
         }
-    suspend fun saveTownSearch(name: String, town: String, categories: List<String> = emptyList()) {
+
+    suspend fun saveSearchFilters(name: String, filters: IosSearchFilters) {
         require(name.trim().length in 1..52) { "El nom del filtre ha de tindre entre 1 i 52 caràcters." }
-        require(town.trim().length in 1..120) { "Tria una població abans de guardar el filtre." }
+        require(filters.isActive && filters.valid()) { "Tria almenys un filtre vàlid." }
         request("preferences/search-filters.php", buildJsonObject {
             put("action", "save")
             put("name", name.trim())
-            put("filters", buildJsonObject { put("town", town.trim()); put("categories", JsonArray(categories.map { JsonPrimitive(it) })) })
+            put("filters", encodeIosSavedFilters(filters))
         }, authenticated = true)
     }
+
     suspend fun removeSavedSearch(name: String) {
         request("preferences/search-filters.php", buildJsonObject {
             put("action", "delete"); put("name", name)
         }, authenticated = true)
+    }
+
+    /** Server, not the local profile-settings label, is the authority for professional access. */
+    suspend fun publisherAccess(): IosPublisherAccess {
+        val root = request("account/publisher-access.php", authenticated = true)
+        val artists = root.arr("managed_artists").mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            .map(String::trim).filter(String::isNotBlank).toSet()
+        return IosPublisherAccess(root.text("role"), root.text("display_name"), artists)
+    }
+
+    /** Android v312 uses the same endpoint for guests and signed-in publishers. */
+    suspend fun ownPublishedEvents(guestId: String): List<IosOwnPublishedEvent> {
+        require(guestId.matches(Regex("[A-Fa-f0-9-]{36}"))) { "Identificador de convidat invàlid" }
+        val root = request("events/my-published-v312.php?guest_id=${guestId.encodeURLParameter()}")
+        return root.items("items").mapNotNull { row ->
+            val id = row.text("event_id").toIntOrNull()?.takeIf { it > 0 } ?: return@mapNotNull null
+            IosOwnPublishedEvent(id, row.text("title"), row.text("status"), row.text("event_date"))
+        }
+    }
+
+    suspend fun publicationTrust(): IosPublicationTrust {
+        val root = request("account/publication-trust.php", authenticated = true)
+        return IosPublicationTrust(root.text("approved_count").toIntOrNull() ?: 0,
+            root.bool("auto_publish_enabled"), root.bool("suspended_by_report"))
+    }
+
+    suspend fun requestProfessionalClaim(entity: String, kind: String, relation: String, contact: String, message: String): String {
+        require(token != null) { "Cal iniciar sessió per reclamar un perfil." }
+        require(entity.trim().isNotBlank() && relation.trim().isNotBlank() && contact.trim().isNotBlank()) { "Emplena els camps obligatoris." }
+        val contactText = contact.trim()
+        val response = request("professional-profiles/request.php", buildJsonObject {
+            put("entity_name", entity.trim().take(190))
+            put("profile_type", if (kind == "ARTIST") "GROUP" else "AGENCY")
+            put("relation", relation.trim().take(255))
+            put("contact_email", if ('@' in contactText) contactText else "")
+            put("contact_phone", if ('@' !in contactText) contactText else "")
+            put("message", message.trim().take(2000))
+        }, authenticated = true)
+        return response.text("message").ifBlank { "Sol·licitud enviada. Et contactarem manualment." }
     }
 
     suspend fun profileSettings(): IosProfileSettings {
@@ -347,6 +428,40 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
             put("entity_label", entityLabel.trim()); put("following", following)
         }, authenticated = true)
     }
+    /** Equivalent to Android's explicit reset; never modifies followed artists or places. */
+    /** Exclusions de contingut: format compatible amb Android, amb Bearer de l'usuari. */
+    suspend fun visibilityExclusions(): IosVisibilityExclusions {
+        val root = request("visibility/index.php", authenticated = true)
+        val data = root["exclusions"] as? JsonObject ?: return IosVisibilityExclusions()
+        fun strings(key:String) = data.arr(key).mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            .map(String::trim).filter(String::isNotBlank).toSet()
+        return IosVisibilityExclusions(strings("artists"),strings("events").mapNotNull(String::toIntOrNull).toSet(),
+            strings("categories"))
+    }
+    suspend fun changeVisibility(kind: String, target: String, hide: Boolean) {
+        require(kind in setOf("ARTIST","EVENT","CATEGORY")) { "Tipus de bloqueig invàlid." }
+        request("visibility/index.php", buildJsonObject {
+            put("action", if (hide) "add" else "remove")
+            put("kind",kind); put("target",target)
+        }, authenticated = true)
+    }
+    /** Llocs / comarques: mateix endpoint i payload de les preferències Android. */
+    suspend fun locationPreferences(): IosServerLocationPreferences {
+        val root = request("preferences/locations.php", authenticated = true)
+        return decodeLocationPreferences(root)
+    }
+    suspend fun saveLocationPreferences(towns: Map<String,Int>, comarques: Set<String>): IosServerLocationPreferences {
+        val root = request("preferences/locations.php", buildJsonObject {
+            put("towns", JsonArray(towns.entries.sortedBy { it.key }.map { (name,radius) ->
+                buildJsonObject { put("name",name.trim()); put("radius_km",com.example.agendavalenciana.model.PersonalizationOptions.validRadius(radius)) }
+            }))
+            put("comarques", JsonArray(comarques.sorted().map { JsonPrimitive(it.trim()) }))
+        }, authenticated = true)
+        return decodeLocationPreferences(root)
+    }
+    suspend fun resetLearnedPersonalization() {
+        request("affinities/reset-learning.php", buildJsonObject {}, authenticated = true)
+    }
     suspend fun followArtist(artist: String, following: Boolean) =
         followEntity("ARTIST", artist.trim(), artist.trim(), following)
     /** Artist bell subscription is independent of following. Preferences are per account on the server. */
@@ -366,6 +481,31 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
         return IosArtistBell(result.text("artist_name").ifBlank { name },
             IosArtistBellPolicy.parseFrequency(result.text("frequency")), result.bool("enabled"))
     }
+    /** Same authenticated mail preference API used by Android. Never claim a save succeeded on HTTP failure. */
+    suspend fun emailPreferences(): IosEmailPreferences {
+        val root = request("mail/preferences-api.php", authenticated = true)
+        val prefs = root["preferences"] as? JsonObject ?: error("Falten preferències de correu")
+        return decodeIosEmailPreferences(prefs)
+    }
+    suspend fun updateEmailPreferences(value: IosEmailPreferences): IosEmailPreferences {
+        require(value.frequency in setOf("NONE", "DAILY", "WEEKLY"))
+        val root = request("mail/preferences-api.php", buildJsonObject {
+            put("digest_frequency",value.frequency)
+            put("recommendations_enabled",value.recommendations)
+            put("followed_artists_enabled",value.followedArtists)
+            put("saved_reminders_enabled",value.savedReminders)
+            put("ads_enabled",value.personalizedAds)
+        }, authenticated = true)
+        val prefs = root["preferences"] as? JsonObject ?: error("El servidor no ha confirmat la configuració")
+        return decodeIosEmailPreferences(prefs)
+    }
+    private fun decodeIosEmailPreferences(prefs: JsonObject) = IosEmailPreferences(
+        frequency = prefs.text("digest_frequency").uppercase().takeIf { it in setOf("NONE", "DAILY", "WEEKLY") } ?: "NONE",
+        recommendations = prefs.bool("recommendations_enabled"),
+        followedArtists = prefs.bool("followed_artists_enabled"),
+        savedReminders = prefs.bool("saved_reminders_enabled"),
+        personalizedAds = prefs.bool("ads_enabled")
+    )
     suspend fun notifications(): List<IosNotification> {
         val main = request("notifications/mine.php", authenticated = true)
             .items("notifications").map { IosNotification(it.text("id").toIntOrNull() ?: 0,
@@ -541,7 +681,9 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
                     it.text("event_artist", "artist_name"), it.text("event_title", "title"),
                     it.text("body", "caption", "text"),
                     validMediaUrl(it.text("image_url", "media_url")),
-                    it.text("story_key").ifBlank { "manual:$id" })
+                    it.text("story_key").ifBlank { "manual:$id" },
+                    IosBatecTime.epochMillis(it.text("published_at")) ?: 0L,
+                    it.text("source_type").ifBlank { "MANUAL" })
             }
             items.forEach { item ->
                 if (item.storyKey.isNotBlank() && !collected.containsKey(item.storyKey)) {
@@ -556,12 +698,22 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
         }
         return collected.values.toList()
     }
+    /** Event creation timestamps make iOS Batecs match Android's automatic 48h news.
+     * Missing/unavailable timestamps must never be replaced with the current time. */
+    suspend fun recentBatecEventCreations(): Map<Int, Long> =
+        request("batecs/recent-events.php", authenticated = true).items("events")
+            .mapNotNull { item ->
+                val id = item.text("event_id").toIntOrNull() ?: return@mapNotNull null
+                val published = IosBatecTime.epochMillis(item.text("created_at")) ?: return@mapNotNull null
+                id to published
+            }.toMap()
+
     /** Seen state is account-specific, server authoritative, and never marked for guest users. */
     suspend fun seenBatecs(): Set<String> = request("batecs/seen.php", authenticated = true)
         .arr("seen_keys").mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
-        .filter { it.matches(Regex("(?:manual|event):\\d+")) }.toSet()
+        .filter(IosBatecTimelinePolicy::isServerSeenKey).toSet()
     suspend fun markBatecSeen(storyKey: String) {
-        require(storyKey.matches(Regex("(?:manual|event):\\d+"))) { "Identificador de batec no vàlid" }
+        require(IosBatecTimelinePolicy.isServerSeenKey(storyKey)) { "Identificador de batec no vàlid" }
         request("batecs/seen.php", buildJsonObject { put("story_key", storyKey) }, authenticated = true)
     }
     /** Public entity metadata, matching the source already used by the Android recommendation engine. */
@@ -592,14 +744,13 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
         return request("admin/user-detail.php?user_id=$userId&days=90", authenticated = true)
     }
 
-    /** Requires deploying SERVIDOR_SUPERADMIN_IOS; does not edit profile fields. */
+    /** Uses the existing authorized PHP route; preserves username/email when omitted. */
     suspend fun adminSetUserAccess(userId: Int, role: String, active: Boolean): JsonObject {
         require(userId > 0 && IosAdminPermissions.validRole(role))
         require(account?.role == "SUPER_ADMIN")
         require(account?.id != userId) { "No pots canviar els teus propis permisos." }
-        return request("admin/user-access-ios.php", buildJsonObject {
+        return request("admin/user-update.php", buildJsonObject {
             put("user_id", userId); put("role", role); put("active", active)
-            put("confirmation", "CANVIAR ACCES")
         }, authenticated = true)
     }
 
@@ -661,6 +812,9 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
 }
 
 data class IosAccount(val id: Int, val username: String, val email: String, val role: String)
+data class IosPublisherAccess(val role: String, val displayName: String, val managedArtists: Set<String>)
+data class IosPublicationTrust(val approvedCount: Int, val autoPublishEnabled: Boolean, val suspended: Boolean)
+data class IosOwnPublishedEvent(val id: Int, val title: String, val status: String, val date: String)
 data class IosFollow(val type: String, val key: String, val label: String)
 data class IosUserState(val follows: List<IosFollow> = emptyList(), val saved: Set<Int> = emptySet(), val alerts: Set<Int> = emptySet()) {
     fun follows(artist: String) = followsType("ARTIST", artist)
@@ -687,7 +841,9 @@ internal fun decodeCommunityGroup(g: JsonObject): IosCommunityGroup = IosCommuni
     g.text("participant_count").toIntOrNull()?:0,g.text("creator_name"))
 data class IosMemberRequest(val userId: Int, val displayName: String, val requestedAt: String)
 data class IosMessage(val id: String, val author: String, val body: String, val createdAt: String, val userId:Int=0)
-data class IosBatec(val id: String, val eventId: Int, val artist: String, val eventTitle: String, val text: String, val imageUrl: String, val storyKey: String = "")
+data class IosBatec(val id: String, val eventId: Int, val artist: String, val eventTitle: String,
+                    val text: String, val imageUrl: String, val storyKey: String = "",
+                    val publishedAtMillis: Long = 0L, val sourceType: String = "MANUAL")
 data class IosAd(val id: String, val eventId: Int, val placement: String, val imageUrl: String,
                      val focusX: Float = 0.5f, val focusY: Float = 0.5f)
 data class IosPromoted(val guaranteedEventIds: Set<Int> = emptySet(), val ads: List<IosAd> = emptyList(),
@@ -702,8 +858,45 @@ data class IosSavedList(val id: Int, val name: String, val owner: Boolean,
 data class IosSavedListShare(val inviteUrl: String, val shareCode: String)
 data class IosProfileSettings(val role: String, val phone: String, val emailVerified: Boolean)
 
-/** Only supported server fields are decoded. */
-data class IosSavedSearch(val name: String, val town: String, val categories: List<String> = emptyList())
+/** A named search contains the same fields as Android's persisted Filters. */
+data class IosSavedSearch(val name: String, val filters: IosSearchFilters)
+
+private val iosCategoryNames = mapOf(
+    "Música" to "MUSIC", "Teatre" to "THEATRE", "Cinema" to "CINEMA",
+    "Xarrades" to "TALKS", "Dansa" to "DANCE", "Exposicions" to "EXHIBITIONS",
+    "Literatura" to "LITERATURE", "Tallers" to "WORKSHOPS", "Infantil" to "CHILDREN",
+    "Cultura popular" to "POPULAR_CULTURE", "Patrimoni" to "HERITAGE", "Altres" to "OTHER"
+)
+private fun decodeCategory(value: String): String =
+    iosCategoryNames.entries.firstOrNull { it.value == value }?.key ?: value
+private fun encodeCategory(value: String): String =
+    iosCategoryNames.entries.firstOrNull { IosAdvancedSearch.norm(it.key) == IosAdvancedSearch.norm(value) }?.value ?: value
+
+internal fun decodeIosSavedFilters(json: JsonObject): IosSearchFilters {
+    val cats = json.names("categories").map(::decodeCategory).toSet()
+    return IosSearchFilters(
+        town = json.text("town"), comarca = json.text("comarca"),
+        radiusKm = json.text("maxDistanceKm", "radiusKm").toIntOrNull() ?: 0,
+        categories = cats, category = json.text("category").let(::decodeCategory),
+        fromDate = json.text("dateFrom", "fromDate"), toDate = json.text("dateTo", "toDate"),
+        month = json.text("month"), maxPrice = json.text("maxPrice").toIntOrNull(),
+        freeOnly = json.bool("freeOnly"), style = json.text("style")
+    )
+}
+internal fun encodeIosSavedFilters(filters: IosSearchFilters): JsonObject = buildJsonObject {
+    val categories = filters.categories.ifEmpty { filters.category.takeIf(String::isNotBlank)?.let { setOf(it) } ?: emptySet() }
+    put("categories", JsonArray(categories.map { JsonPrimitive(encodeCategory(it)) }))
+    if (filters.town.isNotBlank()) put("town", filters.town)
+    if (filters.comarca.isNotBlank()) put("comarca", filters.comarca)
+    if (filters.radiusKm > 0) put("maxDistanceKm", filters.radiusKm)
+    if (filters.fromDate.isNotBlank()) put("dateFrom", filters.fromDate)
+    if (filters.toDate.isNotBlank()) put("dateTo", filters.toDate)
+    if (filters.month.isNotBlank()) put("month", filters.month)
+    if (filters.maxPrice != null) put("maxPrice", filters.maxPrice)
+    if (filters.style.isNotBlank()) put("style", filters.style)
+    put("freeOnly", filters.freeOnly)
+}
+
 
 /** Public server response. Every priority array is included, including internal ticket sales
  * without orders. Never apply affinity/search/exclusion filters to advertising inventory. */
@@ -728,3 +921,21 @@ internal fun decodePromoted(root: JsonObject): IosPromoted {
 
 /** Public profile data; personal images are always stored by the server. */
 data class IosMyProfile(val displayName: String, val bio: String, val photoUrl: String)
+
+/** Native Android preferences/locations.php response contract, also used by iOS. */
+data class IosServerLocationPreferences(val towns: Map<String,Int>, val comarques: Set<String>, val exists: Boolean)
+internal fun decodeLocationPreferences(root: JsonObject): IosServerLocationPreferences {
+    val objectValue = root["locations"] as? JsonObject ?: return IosServerLocationPreferences(emptyMap(),emptySet(),false)
+    val towns = objectValue.items("towns").mapNotNull { item ->
+        item.text("name").takeIf(String::isNotBlank)?.let { name ->
+            name to com.example.agendavalenciana.model.PersonalizationOptions.validRadius(item.text("radius_km").toIntOrNull())
+        }
+    }.toMap()
+    val comarques = objectValue.arr("comarques").mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        .filter(String::isNotBlank).toSet()
+    return IosServerLocationPreferences(towns,comarques,root.bool("exists"))
+}
+
+/** Snapshot compatible amb el GET visibility/index.php d'Android. */
+data class IosVisibilityExclusions(val artists: Set<String> = emptySet(),
+    val events: Set<Int> = emptySet(), val categories: Set<String> = emptySet())

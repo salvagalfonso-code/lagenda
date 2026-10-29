@@ -18,10 +18,10 @@ data class AgendaEventSummary(
     val endDate: String = "", val ticketAvailable: Boolean = false, val ticketUrl: String = "",
     val price: String = "", val schedule: List<AgendaScheduleEntry> = emptyList(),
     val language: String = "", val updatedAt: String = "", val eventStructure: String = "",
-    val savedCount: Int = 0
+    val savedCount: Int = 0, val createdAt: String = ""
 ) {
     val key get() = "${id}_${date}"
-    val isFestival get() = schedule.isNotEmpty() || (endDate.isNotBlank() && endDate != date) || eventStructure == "FESTIVAL"
+    val isFestival get() = IosEventPopupPolicy.isFestival(this)
     val names get() = artists + organizers
     fun matches(q: String): Boolean {
         val term = q.trim()
@@ -129,13 +129,17 @@ object IosEventCatalog {
                 id = id, title = title, date = obj.text("feed_instance_date", "selected_date", "event_date", "start_date", "date").take(10),
                 time = obj.text("start_time", "event_time", "time").take(5), town = obj.text("town"), venue = obj.text("venue"),
                 category = obj.text("categoria_principal_nova", "category"), description = obj.text("description").take(15000),
-                posterUrl = validMediaUrl(obj.text("poster_url")), subtitle = obj.text("subtitle"), artists = obj.names("artists"),
+                posterUrl = validMediaUrl(obj.text("poster_url")), subtitle = obj.text("subtitle"),
+                artists = obj.names("artists").ifEmpty {
+                    obj.text("artist_name", "artist").takeIf(String::isNotBlank)?.let { listOf(it) }.orEmpty()
+                },
                 organizers = obj.names("organizers"), styles = obj.names("styles"), endDate = obj.text("end_date"),
                 ticketAvailable = obj.bool("ticket_sales_enabled") || obj.bool("ticket_available") || obj.bool("ticket_enabled"),
                 ticketUrl = obj.text("ticket_url"), price = obj.text("ticket_price", "price"),
                 language = obj.text("language"), updatedAt = obj.text("updated_at"),
                 eventStructure = obj.text("event_structure").uppercase(),
                 savedCount = obj.text("saved_count").toIntOrNull()?.coerceAtLeast(0) ?: 0,
+                createdAt = obj.text("created_at"),
                 schedule = obj.items("schedule").map { s ->
                     AgendaScheduleEntry(s.text("date", "schedule_date", "start_at").take(10),
                         s.text("start_time", "time").ifBlank { s.text("start_at").drop(11).take(5) }.take(5),

@@ -28,6 +28,10 @@ final class AgendaPushDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         let data = response.notification.request.content.userInfo
         if let artist = data["artist_name"] as? String, !artist.isEmpty {
             AgendaKeychain.shared.didTapArtistNotification(artist)
+        } else if let eventId = (data["event_id"] as? NSNumber)?.intValue, eventId > 0 {
+            AgendaKeychain.shared.didTapEventNotification(eventId)
+        } else if let eventString = data["event_id"] as? String, let eventId = Int(eventString), eventId > 0 {
+            AgendaKeychain.shared.didTapEventNotification(eventId)
         }
         completionHandler()
     }
@@ -41,16 +45,9 @@ struct AgendaIOSApp: App {
             ContentView()
                 .preferredColorScheme(.light)
                 .onAppear {
-                let center = UNUserNotificationCenter.current()
-                center.getNotificationSettings { settings in
-                    if settings.authorizationStatus == .notDetermined {
-                        center.requestAuthorization(options: [.alert, .badge, .sound]) { allowed, _ in
-                            if allowed { AgendaKeychain.shared.ensureRemoteRegistrationIfPermitted() }
-                        }
-                    } else {
-                        AgendaKeychain.shared.ensureRemoteRegistrationIfPermitted()
-                    }
-                }
+                // Only register if permission was previously granted; the bell/reminder
+                // flow requests permission in context rather than on first app launch.
+                AgendaKeychain.shared.ensureRemoteRegistrationIfPermitted()
             }
         }
     }

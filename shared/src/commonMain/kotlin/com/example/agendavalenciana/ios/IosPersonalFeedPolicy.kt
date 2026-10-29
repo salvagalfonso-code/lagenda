@@ -37,6 +37,9 @@ object IosPersonalFeedPolicy {
             .map(::norm).filter(String::isNotBlank).toSet()
         val preferredCodes = (settings.categories + settings.subcategories + followedCategories)
             .map(IosStyleAffinityCatalog::canonical).filter(String::isNotBlank).toSet()
+        val explicitSubcategoryKeys = (settings.categories + settings.subcategories +
+            follows.filter { it.type.equals("CATEGORY",true) }.map { it.key }).toSet()
+        val selectedSubcategories = IosPersonalizationTaxonomy.subcategories.filter { it.code in explicitSubcategoryKeys }
         val hasLocationPrefs = settings.towns.isNotEmpty() || settings.comarques.isNotEmpty()
         val normalizedRecent = recentStyles.map(IosStyleAffinityCatalog::canonical).toSet()
         // Prefer authoritative entity metadata; fall back to actual event styles only
@@ -69,13 +72,20 @@ object IosPersonalFeedPolicy {
             if (!seen.add(e.key)) continue
             val followed = (e.artists + e.scheduleArtists).any { norm(it) in followedArtists } ||
                 e.organizers.any { norm(it) in followedOrganizers } || norm(e.venue) in followedVenues
-            val codes = styles(e.styles) + IosStyleAffinityCatalog.canonical(e.category)
+            val categoryCode = IosPersonalizationTaxonomy.categoryForEvent(e.category)
+            val codes = styles(e.styles) + IosStyleAffinityCatalog.canonical(e.category) +
+                listOfNotNull(categoryCode?.let(IosStyleAffinityCatalog::canonical)) +
+                (if (e.styles.any { IosGeoPlaces.key(it) in setOf("infantil","familiar","public infantil") })
+                    listOf(IosStyleAffinityCatalog.canonical("CHILDREN")) else emptyList())
+            val exactSubcategoryMatch = selectedSubcategories.any { sub ->
+                IosPersonalizationTaxonomy.matchesSubcategory(sub.code,e.category,e.styles)
+            }
             val fromFollowedStyle = followedStyles.isNotEmpty() && codes.any { it in followedStyles } &&
                 hasLocationPrefs && geo(e, false)
             // Category without a place: cultural interest; place without category: local activities.
             // Both: require BOTH cultural affinity and the 100 km preference area.
             val personalization = (preferredCodes.isNotEmpty() || hasLocationPrefs) &&
-                (preferredCodes.isEmpty() || codes.any { it in preferredCodes }) &&
+                (preferredCodes.isEmpty() || codes.any { it in preferredCodes } || exactSubcategoryMatch) &&
                 (!hasLocationPrefs || geo(e, true))
             if (followed || fromFollowedStyle || personalization || e.id in guaranteed || e.ticketSale) {
                 core.add(e.key)

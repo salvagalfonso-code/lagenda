@@ -52,6 +52,10 @@ internal fun AgendaGlyph(name: String, modifier: Modifier = Modifier.size(24.dp)
                 cornerRadius=androidx.compose.ui.geometry.CornerRadius(1.8f*sx), style=Stroke(sw*sx))
         when(name) {
             "plus" -> { line(12f,4f,12f,20f,2.7f); line(4f,12f,20f,12f,2.7f) }
+            "edit" -> { outlineRect(3f,4f,18f,16f); line(7f,17f,16f,8f); line(14f,7f,17f,10f) }
+            "campaign" -> { line(4f,10f,12f,7f); line(12f,7f,19f,4f); line(19f,4f,19f,17f); line(19f,17f,12f,14f); line(12f,14f,4f,14f); line(4f,10f,4f,14f); line(7f,15f,9f,21f) }
+            "disc" -> { outlineCircle(12f,12f,9f); outlineCircle(12f,12f,2.3f) }
+            "check" -> { outlineCircle(12f,12f,9f); line(7f,12f,11f,16f); line(11f,16f,18f,8f) }
             "close" -> { line(5f,5f,19f,19f,2.2f); line(19f,5f,5f,19f,2.2f) }
             "person" -> {
                 outlineCircle(12f,7f,3.6f,2.2f)
@@ -93,6 +97,16 @@ internal fun AgendaGlyph(name: String, modifier: Modifier = Modifier.size(24.dp)
                 line(3f,20f,3f,18f); line(3f,18f,6f,14.5f); line(6f,14.5f,14f,14.5f)
                 line(14f,14.5f,17f,18f); line(17f,18f,17f,20f); line(17f,20f,3f,20f)
                 line(18.5f,15f,21f,15f); line(21f,15f,22f,20f) }
+            "star" -> {
+                val path=Path().apply {
+                    moveTo(12f*sx,2.5f*sy);lineTo(15f*sx,9f*sy);lineTo(22f*sx,9.5f*sy)
+                    lineTo(16.5f*sx,14.4f*sy);lineTo(18.2f*sx,21.5f*sy)
+                    lineTo(12f*sx,17.8f*sy);lineTo(5.8f*sx,21.5f*sy)
+                    lineTo(7.5f*sx,14.4f*sy);lineTo(2f*sx,9.5f*sy)
+                    lineTo(9f*sx,9f*sy);close()
+                }
+                drawPath(path,color,style=Stroke(1.8f*sx))
+            }
             "info" -> { outlineCircle(12f,12f,9f); line(12f,11f,12f,17f); drawCircle(color,1.3f*sx,p(12f,7f)) }
             else -> outlineCircle(12f,12f,8f)
         }

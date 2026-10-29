@@ -119,6 +119,18 @@ final class AgendaKeychain: NSObject, IosSessionBridge {
             writeCache(key: "push_open_artist", value: "")
             DispatchQueue.main.async { listener.onOpenArtist(artist: pending) }
         }
+        if let pending = readCache(key: "push_open_event_id"), let id = Int32(pending), id > 0 {
+            writeCache(key: "push_open_event_id", value: "")
+            DispatchQueue.main.async { listener.onOpenEvent(eventId: id) }
+        }
+    }
+    func didTapEventNotification(_ eventId: Int) {
+        guard eventId > 0 && eventId <= Int(Int32.max) else { return }
+        writeCache(key: "push_open_event_id", value: String(eventId))
+        DispatchQueue.main.async {
+            self.pushOpenListener?.onOpenEvent(eventId: Int32(eventId))
+            if self.pushOpenListener != nil { self.writeCache(key: "push_open_event_id", value: "") }
+        }
     }
     func didTapArtistNotification(_ artist: String) {
         guard !artist.isEmpty else { return }
@@ -216,6 +228,16 @@ final class AgendaKeychain: NSObject, IosSessionBridge {
             .removePendingNotificationRequests(withIdentifiers: [
                 "agenda-event-\(userId)-\(eventId)", "agenda-event-\(eventId)"
             ])
+    }
+    func cancelAllLocalReminders(userId: Int32) {
+        guard userId > 0 else { return }
+        let prefix = "agenda-event-\(userId)-"
+        UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
+            let ids = requests.map(\.identifier).filter { $0.hasPrefix(prefix) }
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids)
+        }
+        writeCache(key: "push_open_event_id", value: "")
+        writeCache(key: "push_open_artist", value: "")
     }
 }
 
