@@ -445,7 +445,7 @@ internal fun IosPersonalizationScreen(
     }
 }
 @Composable private fun PersonalSuggestionRow(name: String, type: String, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick).heightIn(min = 42.dp).padding(horizontal = 7.dp),
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).heightIn(min = 42.dp).padding(horizontal = 7.dp),
         verticalAlignment = Alignment.CenterVertically) {
         PersonalAvatar(name, ""); Spacer(Modifier.width(9.dp)); Text(name, modifier = Modifier.weight(1f), fontSize = 13.sp)
         Text(type, fontSize = 11.sp, color = mutedText); Text("  +", fontSize = 20.sp)
