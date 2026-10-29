@@ -40,6 +40,7 @@ final class AgendaPushDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
 @main
 struct AgendaIOSApp: App {
     @UIApplicationDelegateAdaptor(AgendaPushDelegate.self) var pushDelegate
+    @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -49,6 +50,13 @@ struct AgendaIOSApp: App {
                 // flow requests permission in context rather than on first app launch.
                 AgendaKeychain.shared.ensureRemoteRegistrationIfPermitted()
             }
+                .onChange(of: scenePhase) { phase in
+                    switch phase {
+                    case .background: AgendaKeychain.shared.feedSceneMovedToBackground()
+                    case .active: AgendaKeychain.shared.feedSceneBecameActive()
+                    default: break
+                    }
+                }
         }
     }
 }

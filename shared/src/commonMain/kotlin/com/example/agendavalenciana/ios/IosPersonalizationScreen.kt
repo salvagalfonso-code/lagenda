@@ -226,10 +226,9 @@ internal fun IosPersonalizationScreen(
                                             overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                                         if (name in localArtistAlerts) Text("♧", fontSize = 12.sp)
                                         TextButton(onClick = {
-                                            if (accountSignedIn) {
-                                                localArtistFollows = if (following) localArtistFollows - name else localArtistFollows + name
-                                                onFollowArtist(name)
-                                            }
+                                            // Guest follows are persisted locally and migrated at login.
+                                            localArtistFollows = if (following) localArtistFollows - name else localArtistFollows + name
+                                            onFollowArtist(name)
                                         }, modifier = Modifier.width(42.dp), contentPadding = PaddingValues(0.dp)) {
                                             Text(if (following) "✓" else "+", color = personalizationText, fontSize = 25.sp)
                                         }
@@ -252,7 +251,7 @@ internal fun IosPersonalizationScreen(
                                     }
                                 }
                             }
-                            if (!accountSignedIn) item { Text("Inicia sessió per seguir artistes i activar avisos.", fontSize = 12.sp, color = mutedText) }
+                            if (!accountSignedIn) item { Text("Pots seguir artistes sense compte. Inicia sessió per activar avisos.", fontSize = 12.sp, color = mutedText) }
                             if (visible.size > moreLimit) item { OutlinedButton(onClick = { moreLimit += 20 }, modifier = Modifier.fillMaxWidth()) { Text("Mostrar 20 artistes més") } }
                         }
                         2 -> {
@@ -403,7 +402,7 @@ internal fun IosPersonalizationScreen(
                     }
                 } else {
                     hiddenArtistsDraft = hiddenArtistsDraft + name
-                    if (name in localArtistFollows && accountSignedIn) {
+                    if (name in localArtistFollows) {
                         localArtistFollows = localArtistFollows - name
                         onFollowArtist(name)
                     }

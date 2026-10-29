@@ -49,6 +49,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 private val Ink = Color(0xFF252329)
 private val Accent = Color(0xFFE8DFF2)
@@ -86,6 +92,22 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var chosenSuggestion by remember { mutableStateOf<IosSearchSuggestion?>(null) }
     var appliedSuggestion by remember { mutableStateOf<IosSearchSuggestion?>(null) }
     var limit by remember { mutableIntStateOf(5) }
+    // Restored only after a real background interval, not when closing a popup or changing tabs.
+    var feedExpiredEpoch by remember { mutableIntStateOf(0) }
+    DisposableEffect(sessionBridge) {
+        // Covers cold starts, including an iOS process killed while suspended.
+        if (IosFeedReadingSession.foreground()) feedExpiredEpoch++
+        sessionBridge?.setFeedLifecycleListener(object : IosFeedLifecycleCallback {
+            override fun onForeground() {
+                if (IosFeedReadingSession.foreground()) feedExpiredEpoch++
+            }
+            override fun onBackground() { IosFeedReadingSession.background() }
+        })
+        onDispose { sessionBridge?.setFeedLifecycleListener(null) }
+    }
+    LaunchedEffect(feedExpiredEpoch) {
+        if (feedExpiredEpoch > 0) limit = 5
+    }
     var selected by remember { mutableStateOf<AgendaEventSummary?>(null) }
     var artist by remember { mutableStateOf<String?>(null) }
     var artistSourceEvent by remember { mutableStateOf<AgendaEventSummary?>(null) }
@@ -128,8 +150,55 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     }
     var notificationsOpen by remember { mutableStateOf(false) }
     var communityGroup by remember { mutableStateOf<IosCommunityGroup?>(null) }
-    var user by remember { mutableStateOf(IosUserState()) }
+    val guestFollowTransfer = remember {
+        IosGuestFollowTransfer(::platformReadPublicCache, ::platformWritePublicCache)
+    }
+    var user by remember { mutableStateOf(IosUserState(follows = guestFollowTransfer.guest())) }
     var account by remember { mutableStateOf<IosAccount?>(null) }
+    val followSyncMutex = remember { Mutex() }
+    // Android's account ∪ guest migration: first journal, then post missing follows.
+    // Never clear a journal entry before a server response confirms it.
+    fun stageGuestFollows(accountId: Int) {
+        val guestCategories = (iosScopedSet("pref_categories", null) + iosScopedSet("pref_subcategories", null))
+            .map { IosPersonalizationTaxonomy.canonicalFollowKey(it) }
+            .filter { key -> key in IosPersonalizationTaxonomy.categories.map { it.code } ||
+                key == "CHILDREN" || IosPersonalizationTaxonomy.subcategories.any { it.code == key } }
+            .map { key ->
+                val label = IosPersonalizationTaxonomy.categoryLabel(key).let { if (it == key)
+                    IosPersonalizationTaxonomy.subcategoryLabel(key) else it }
+                IosFollow("CATEGORY", key, label)
+            }
+        val staged = guestFollowTransfer.stage(accountId, guestCategories)
+        if (guestCategories.all { IosGuestFollowTransfer.contains(staged, it) } &&
+            guestCategories.all { IosGuestFollowTransfer.contains(guestFollowTransfer.pending(accountId), it) }) {
+            // Guest category tastes must not be accidentally imported into a SECOND account.
+            platformWritePublicCache(iosScopedCacheKey("pref_categories",null), "~")
+            platformWritePublicCache(iosScopedCacheKey("pref_subcategories",null), "~")
+        }
+    }
+    suspend fun synchronizeGuestFollows(accountId: Int, remoteFollows: List<IosFollow>) {
+        followSyncMutex.withLock {
+            if (account?.id != accountId) return@withLock
+            // A remote read may already contain a previous successful POST.
+            remoteFollows.filter { remote ->
+                guestFollowTransfer.pending(accountId).any { pending ->
+                    IosGuestFollowTransfer.contains(listOf(remote), pending)
+                }
+            }.forEach { guestFollowTransfer.acknowledge(accountId, it) }
+            for (follow in guestFollowTransfer.missing(accountId, remoteFollows)) {
+                if (account?.id != accountId) break
+                // Continue with later entities even when one post fails.
+                val confirmed = runCatching { api.followEntity(follow.type, follow.key, follow.label, true) }.isSuccess
+                if (confirmed) guestFollowTransfer.acknowledge(accountId, follow)
+            }
+        }
+        if (account?.id == accountId && guestFollowTransfer.pending(accountId).isNotEmpty())
+            status = "Alguns seguiments encara estan pendents de sincronitzar"
+    }
+    // On a cold launch the Keychain may already belong to a logged-in user.
+    // Never overwrite that user's stored reading position with a temporary guest feed
+    // while auth/me.php is resolving (or the network is unavailable).
+    var awaitingInitialAccount by remember { mutableStateOf(!api.token.isNullOrBlank()) }
     var notices by remember { mutableStateOf(emptyList<IosNotification>()) }
     var notificationPreferences by remember(account?.id) {
         mutableStateOf(IosNotificationPreferences.decode(platformReadPublicCache(iosScopedCacheKey("notification_preferences",account?.id))))
@@ -263,7 +332,10 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 entityStyles = withContext(Dispatchers.Default) { IosEntityAffinityCatalog.refresh(api, force) }
                 if (requestedAccountId != null) {
                     val refreshedUser = runCatching { api.userState() }.getOrNull()
-                    if (account?.id == requestedAccountId && refreshedUser != null) user = refreshedUser
+                    if (account?.id == requestedAccountId && refreshedUser != null) {
+                        user = refreshedUser.copy(follows = guestFollowTransfer.preview(requestedAccountId, refreshedUser.follows))
+                        synchronizeGuestFollows(requestedAccountId, refreshedUser.follows)
+                    }
                 }
                 val newPublications = runCatching { api.batecs(user.follows.filter { it.type.equals("ARTIST", true) }
                     .map { it.label }.toSet()) }.getOrNull()
@@ -325,7 +397,9 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 val remoteVisibility = visibilityRequest.await()
                 // Never replace the new account's state with an old account's response.
                 if (account?.id == expectedAccount) {
-                    user = newUser
+                    user = newUser.copy(follows = guestFollowTransfer.preview(expectedAccount, newUser.follows))
+                    // Send additions in the background, without blocking other account pages.
+                    scope.launch { synchronizeGuestFollows(expectedAccount, newUser.follows) }
                     newBatecs?.let { batecs = it }
                     newNotices?.let { notices = it }
                     newBells?.let { artistBells = it.filter { b -> b.enabled }.associateBy { b -> IosArtistBellPolicy.key(b.artistName) } }
@@ -394,8 +468,12 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     LaunchedEffect(Unit) {
         refresh(false)
         val restored = api.restoreAccount()
+        awaitingInitialAccount = restored == null && !api.token.isNullOrBlank()
         if (restored != null) {
-            account = restored; useAccountPreferences(restored.id); loadAccountPages()
+            account = restored
+            stageGuestFollows(restored.id)
+            user = user.copy(follows = guestFollowTransfer.preview(restored.id, emptyList()))
+            useAccountPreferences(restored.id); loadAccountPages()
             myProfile = runCatching { api.myPublicProfile() }.getOrNull()
         }
     }
@@ -518,6 +596,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     }
     // Android: changing a feed tab abandons the active query, criteria and named list.
     fun chooseFeedMode(mode: String, category: String? = null) {
+        // A deliberate mode change starts a new reading view.
+        IosFeedReadingSession.clear()
         feedMode = mode
         selectedFeedCategory = if (mode == "Categoria") category else null
         activeFilterPresetName = null
@@ -730,23 +810,39 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         }
     }
     fun toggleFollowEntity(type: String, value: String) {
-        if (account == null) { loginOpen = true; return }
         val clean = value.trim()
         if (clean.isBlank() || type !in setOf("ARTIST", "ORGANIZER", "VENUE", "CATEGORY")) return
-        val expectedId = account?.id ?: return
-        val actionId = "$type:$clean"
+        val canonical = if (type == "CATEGORY") IosPersonalizationTaxonomy.canonicalFollowKey(clean) else clean
+        val follow = IosFollow(type, canonical, if (type == "CATEGORY") {
+            IosPersonalizationTaxonomy.categoryLabel(canonical).let {
+                if (it == canonical) IosPersonalizationTaxonomy.subcategoryLabel(canonical) else it
+            }
+        } else clean)
+        val expectedId = account?.id
+        val actionId = "$type:$canonical"
         if (actionId in pendingFollows) return
-        val next = !IosFollowMutation.contains(user.follows, type, clean)
+        val next = !IosGuestFollowTransfer.contains(user.follows, follow)
+        if (expectedId == null) {
+            val nextFollows = IosFollowMutation.updated(user.follows,type,canonical,follow.label,next)
+            guestFollowTransfer.setGuest(nextFollows)
+            user = user.copy(follows = nextFollows)
+            status = if (next) "Ara seguixes $clean" else "Has deixat de seguir $clean"
+            return
+        }
         pendingFollows = pendingFollows + actionId
         work {
             try {
-                api.followEntity(type, clean, clean, next)
-                if (account?.id != expectedId) return@work
-                user = user.copy(follows = IosFollowMutation.updated(user.follows, type, clean, clean, next))
-                status = if (next) "Ara seguixes $clean" else "Has deixat de seguir $clean"
-            } finally {
-                pendingFollows = pendingFollows - actionId
-            }
+                followSyncMutex.withLock {
+                    if (account?.id != expectedId) return@withLock
+                    api.followEntity(type, canonical, follow.label, next)
+                    if (account?.id != expectedId) return@withLock
+                    // An explicit unfollow must not be re-added by the pending guest journal.
+                    if (!next) guestFollowTransfer.acknowledge(expectedId, follow)
+                    user = user.copy(follows = IosFollowMutation.updated(user.follows,
+                        type,canonical,follow.label,next))
+                    status = if (next) "Ara seguixes $clean" else "Has deixat de seguir $clean"
+                }
+            } finally { pendingFollows = pendingFollows - actionId }
         }
     }
     fun toggleFollow(value: String) = toggleFollowEntity("ARTIST", value)
@@ -816,6 +912,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                             if (query.isNotBlank()) {
                                                 feedMode = "Sense filtre"; selectedFeedCategory = null; activeFilterPresetName = null
                                             }
+                                            IosFeedReadingSession.clear()
                                             appliedQuery = query.trim(); appliedSuggestion = chosenSuggestion
                                             limit = 5; IosRecentInterest.recordSearch(account?.id, appliedQuery, available)
                                         }))
@@ -831,6 +928,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                             if (query.isNotBlank()) {
                                 TextButton(onClick = {
                                     feedMode = "Sense filtre"; selectedFeedCategory = null; activeFilterPresetName = null
+                                    IosFeedReadingSession.clear()
                                     appliedQuery = query.trim(); appliedSuggestion = chosenSuggestion
                                     limit = 5; IosRecentInterest.recordSearch(account?.id, appliedQuery, available)
                                 }, modifier = Modifier.align(Alignment.End)) { Text("Cercar") }
@@ -843,6 +941,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                             feedMode = "Sense filtre"; selectedFeedCategory = null; activeFilterPresetName = null
                                             chosenSuggestion = suggestion
                                             query = suggestion.value
+                                            IosFeedReadingSession.clear()
                                             appliedQuery = suggestion.value
                                             appliedSuggestion = suggestion
                                             suggestionDraft = ""
@@ -1036,11 +1135,21 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                 onLoadMore = { limit = IosUnfilteredFeedPolicy.nextCount(limit, personalizedFeed.size) },
                                 today = today,
                                 scrollContext = "${feedMode}|${selectedFeedCategory}|${activeFilterPresetName}|${appliedQuery}|${effectiveSearchFilters.hashCode()}|${account?.id}",
+                                readingEnabled = !awaitingInitialAccount && feedMode == "Per a tu" && !searchInProgress && activeFilterPresetName == null,
+                                loadedCount = limit,
+                                onRestoreLoaded = { required -> limit = maxOf(limit, required) },
+                                feedExpiredEpoch = feedExpiredEpoch,
+                                catalogHydrated = IosEventCatalog.fullyHydrated(),
                                 savedIds = user.saved, onClick = { showEvent(it, appliedQuery) }, onSave = ::toggleSaved,
                                 ads = paid.ads, protectedIds = paid.guaranteedEventIds,
                                 commercialEvents = eventById,
                                 onAdViewed = ::adViewed, onAdOpened = ::adOpened,
-                                refreshing = updating, onRefresh = { refresh(true) },
+                                refreshing = updating, onRefresh = {
+                                    IosFeedReadingSession.clear()
+                                    feedExpiredEpoch++
+                                    limit = 5
+                                    refresh(true)
+                                },
                                 returnToStartEpoch = batecsReturnEpoch,
                                 onExclude = ::excludeFromFeed, onReport = { reportEvent = it })
                         }
@@ -1193,7 +1302,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                     account?.id?.let { sessionBridge?.cancelAllLocalReminders(it) }
                                     try { api.signOutSecurely() } catch (_: Exception) { api.signOut() }
                                     account = null; myProfile = null; profileSettings = null
-                                    user = IosUserState(); artistBells = emptyMap(); tickets = emptyList()
+                                    user = IosUserState(follows = guestFollowTransfer.guest()); artistBells = emptyMap(); tickets = emptyList()
                                     notices = emptyList(); groups = emptyList(); seenBatecs = emptySet()
                                     batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList()
                                     activeFilterPresetName = null; selectedFeedCategory = null
@@ -1241,8 +1350,9 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         if (registrationOpen) RegistrationDialog(onDismiss = { registrationOpen = false }, onSubmit = { username, email, password ->
             work {
                 account = api.registerAccount(username, email, password)
+                stageGuestFollows(account!!.id)
                 profileSettings = null
-                user = IosUserState(); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null
+                user = IosUserState(follows = guestFollowTransfer.preview(account!!.id, emptyList())); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null
                 useAccountPreferences(account?.id)
                 registrationOpen = false; loginOpen = false; status = "Compte creat"
                 loadAccountPages()
@@ -1323,8 +1433,9 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                     work {
                         val next = api.signInWithProvider(provider, idToken, nonce)
                         account = next
+                        stageGuestFollows(next.id)
                         profileSettings = null
-                        user = IosUserState(); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList()
+                        user = IosUserState(follows = guestFollowTransfer.preview(next.id, emptyList())); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList()
                         groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null
                         myProfile = null; useAccountPreferences(next.id)
                         loginOpen = false; status = "Sessió iniciada amb $provider"
@@ -1340,8 +1451,9 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         }, onSubmit = { login, password ->
             work {
                 account = api.signIn(login, password)
+                stageGuestFollows(account!!.id)
                 profileSettings = null
-                user = IosUserState(); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null
+                user = IosUserState(follows = guestFollowTransfer.preview(account!!.id, emptyList())); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null
                 useAccountPreferences(account?.id)
                 loginOpen = false; status = "Sessió iniciada"
                 loadAccountPages()
@@ -1479,22 +1591,37 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                         }.onFailure { error = "Llocs guardats en iPhone, però falta sincronitzar-los: ${it.message.orEmpty()}" }
                     }
                 }
+                if (accountId == null) {
+                    val guestWithoutCategories = user.follows.filterNot { it.type.equals("CATEGORY",true) }
+                    val guestCategories = nextKeys.map { key ->
+                        val label = IosPersonalizationTaxonomy.categoryLabel(key).let { if (it == key)
+                            IosPersonalizationTaxonomy.subcategoryLabel(key) else it }
+                        IosFollow("CATEGORY",key,label)
+                    }
+                    val merged = IosGuestFollowTransfer.union(guestWithoutCategories,guestCategories)
+                    guestFollowTransfer.setGuest(merged)
+                    user = user.copy(follows = merged)
+                }
                 if (accountId != null && nextKeys != serverKeys) work {
                     // Persist changes through the same user-state/follow.php service as Android.
                     val removals = serverKeys - nextKeys
                     val additions = nextKeys - serverKeys
                     val outcomes = (removals.map { it to false } + additions.map { it to true })
                     var failed = 0
-                    for ((key, following) in outcomes) {
-                        val label = IosPersonalizationTaxonomy.categoryLabel(key).let { if (it == key)
-                            IosPersonalizationTaxonomy.subcategoryLabel(key) else it }
-                        runCatching { api.followEntity("CATEGORY",key,label,following) }
-                            .onSuccess {
-                                if (account?.id == accountId) {
-                                    user = user.copy(follows = IosFollowMutation.updated(
-                                        user.follows,"CATEGORY",key,label,following))
-                                }
-                            }.onFailure { failed++ }
+                    followSyncMutex.withLock {
+                        for ((key, following) in outcomes) {
+                            if (account?.id != accountId) break
+                            val label = IosPersonalizationTaxonomy.categoryLabel(key).let { if (it == key)
+                                IosPersonalizationTaxonomy.subcategoryLabel(key) else it }
+                            runCatching { api.followEntity("CATEGORY",key,label,following) }
+                                .onSuccess {
+                                    if (account?.id == accountId) {
+                                        if (!following) guestFollowTransfer.acknowledge(accountId,IosFollow("CATEGORY",key,label))
+                                        user = user.copy(follows = IosFollowMutation.updated(
+                                            user.follows,"CATEGORY",key,label,following))
+                                    }
+                                }.onFailure { failed++ }
+                        }
                     }
                     if (failed > 0) error = "$failed seguiments de categoria no s'han sincronitzat amb el servidor."
                 }
@@ -1948,11 +2075,14 @@ private fun SponsoredCarousel(label: String, ads: List<IosAd>, eventById: Map<In
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
 @Composable
 private fun EventList(events: List<AgendaEventSummary>, total: Int,
                       headerContent: @Composable () -> Unit, onLoadMore: () -> Unit,
                       today: String, scrollContext: String,
+                      readingEnabled: Boolean, loadedCount: Int,
+                      onRestoreLoaded: (Int) -> Unit, feedExpiredEpoch: Int,
+                      catalogHydrated: Boolean,
                       savedIds: Set<Int>, onClick: (AgendaEventSummary) -> Unit,
                       onSave: (AgendaEventSummary) -> Unit, ads: List<IosAd>,
                       protectedIds: Set<Int>, commercialEvents: Map<Int, AgendaEventSummary>,
@@ -1962,13 +2092,60 @@ private fun EventList(events: List<AgendaEventSummary>, total: Int,
                       returnToStartEpoch: Int,
                       onExclude: (AgendaEventSummary, String) -> Unit,
                       onReport: (AgendaEventSummary) -> Unit) {
+    // LazyListState lives across ordinary recompositions; disk state survives full relaunches.
     val listState = rememberLazyListState()
-    // A new mode/confirmed search has a new sequence. Do not reuse a deep scroll position
-    // from an old filtered feed, even if the advertisement header is present.
-    LaunchedEffect(scrollContext) { listState.scrollToItem(0) }
-    // Closing the Batec returns the whole feed to its first card/ad, not only the story strip.
+    val restored = remember(scrollContext, readingEnabled, feedExpiredEpoch) {
+        if (readingEnabled) IosFeedReadingSession.load(scrollContext) else null
+    }
+    var restoredToCard by remember(scrollContext, readingEnabled, feedExpiredEpoch) {
+        mutableStateOf(restored == null)
+    }
+    LaunchedEffect(scrollContext, readingEnabled, feedExpiredEpoch) {
+        if (restored != null) {
+            // A restored index is beyond the initial five cards: hydrate enough BEFORE scrollToItem.
+            onRestoreLoaded(maxOf(5, restored.loaded, restored.index + 20))
+        } else {
+            listState.scrollToItem(0)
+        }
+    }
+    LaunchedEffect(scrollContext, feedExpiredEpoch, events.size, total, restored, catalogHydrated) {
+        val target = restored
+        if (target != null && !restoredToCard && events.isNotEmpty()) {
+            // Wait for Compose to lay out the newly hydrated batch, avoiding an early clamp to 0.
+            val required = target.index
+            if (events.size + 1 > required || (catalogHydrated && events.size >= total)) {
+                val count = snapshotFlow { listState.layoutInfo.totalItemsCount }.first {
+                    it > required || (catalogHydrated && events.size >= total && it > 0)
+                }
+                listState.scrollToItem(required.coerceIn(0, count - 1), target.offset)
+                restoredToCard = true
+            }
+        }
+    }
+    // Reproduce Android's exact index + pixel offset; keep the latest unsaved pixels in RAM
+    // so entering the iOS background flushes them without waiting for the debounce.
+    LaunchedEffect(scrollContext, readingEnabled, restoredToCard, loadedCount, feedExpiredEpoch) {
+        if (readingEnabled && restoredToCard) {
+            snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+                .onEach { (index, offset) ->
+                    IosFeedReadingSession.cache(scrollContext, index, offset, loadedCount)
+                }
+                .debounce(350L)
+                .collect { IosFeedReadingSession.flush() }
+        }
+    }
+    DisposableEffect(scrollContext, readingEnabled, restoredToCard) {
+        onDispose { if (readingEnabled && restoredToCard) IosFeedReadingSession.flush() }
+    }
+    // Batecs intentionally return to the first card, even with a persisted reading session.
     LaunchedEffect(returnToStartEpoch) {
-        if (returnToStartEpoch > 0) listState.scrollToItem(0)
+        if (returnToStartEpoch > 0) {
+            listState.scrollToItem(0)
+            if (readingEnabled) {
+                IosFeedReadingSession.cache(scrollContext, 0, 0, loadedCount)
+                IosFeedReadingSession.flush()
+            }
+        }
     }
     val premiumAds = remember(ads) { ads.filter { it.placement == "FEED_PREMIUM" } }
     val normalAds = remember(ads) { ads.filter { it.placement == "FEED_NORMAL" } }

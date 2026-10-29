@@ -42,6 +42,21 @@ final class AgendaKeychain: NSObject, IosSessionBridge {
 
     func clearToken() { SecItemDelete(query as CFDictionary) }
 
+    // Lifecycle de lectura: SwiftUI avisa Compose sense esperar a una consulta de xarxa.
+    private var feedLifecycleListener: IosFeedLifecycleCallback?
+    func setFeedLifecycleListener(listener: IosFeedLifecycleCallback?) {
+        feedLifecycleListener = listener
+    }
+    func feedSceneMovedToBackground() {
+        // Persistir el moment fins i tot si iOS suspén l'execució de Kotlin immediatament.
+        feedLifecycleListener?.onBackground()
+        writeCache(key: "ios_feed_reading_v350_background_at",
+                   value: String(Int64(Date().timeIntervalSince1970 * 1000)))
+    }
+    func feedSceneBecameActive() {
+        feedLifecycleListener?.onForeground()
+    }
+
     /// Store large catalog JSON as a file, not in UserDefaults (which is for small prefs).
     private var cacheDirectory: URL? {
         guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?

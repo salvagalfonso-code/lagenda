@@ -77,6 +77,8 @@ object IosEventCatalog {
         return saved
     }
     fun cacheAgeMs(): Long = (currentEpochMillis() - savedAtMs).coerceAtLeast(0L)
+    /** True only after the preview has been replaced by the full local/remote catalog. */
+    fun fullyHydrated(): Boolean { cached(); return !previewOnly }
     suspend fun get(force: Boolean = false): List<AgendaEventSummary> {
         val existing = cached()
         if (!force && existing.isNotEmpty() && cacheAgeMs() < CACHE_MS) {

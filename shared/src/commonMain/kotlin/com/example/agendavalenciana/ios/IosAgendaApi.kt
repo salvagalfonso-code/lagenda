@@ -35,6 +35,8 @@ interface IosSessionBridge {
     /** Ask iOS for remote notifications; registration with APNs happens asynchronously. */
     fun requestRemoteNotifications(callback: IosReminderSchedulingCallback)
     fun setPushOpenListener(listener: IosPushOpenCallback)
+    /** iOS scenePhase: snapshot at background and restore after foreground. */
+    fun setFeedLifecycleListener(listener: IosFeedLifecycleCallback?)
     /** Native identity-provider UI; ID token + nonce are verified by our server. */
     fun beginSocialSignIn(provider: String, callback: IosSocialAuthCallback)
     /** Photos are JPEG-compressed before crossing the KMP bridge, not kept in preferences. */
@@ -58,6 +60,12 @@ interface IosReminderSchedulingCallback {
 interface IosPushOpenCallback {
     fun onOpenArtist(artist: String)
     fun onOpenEvent(eventId: Int)
+}
+
+/** Swift scenePhase events, delivered without a polling loop while the app is suspended. */
+interface IosFeedLifecycleCallback {
+    fun onForeground()
+    fun onBackground()
 }
 
 /** The iOS bridge is installed before any Compose state is restored. */
