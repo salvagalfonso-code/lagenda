@@ -4,6 +4,8 @@ import AgendaShared
 struct ContentView: View {
     var body: some View {
         AgendaComposeView()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.white.ignoresSafeArea())
             .ignoresSafeArea(.keyboard)
     }
 }

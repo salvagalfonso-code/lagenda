@@ -344,7 +344,12 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         // even when the user enters a search; avoid duplicates by event occurrence.
         val commercialIds = paid.guaranteedEventIds + paid.ads.map { it.eventId }
         val guaranteed = available.filter { it.id in commercialIds || it.ticketAvailable }
-        val organic = if (searchInProgress || feedMode == "Sense filtre") filtered else forYou
+        val organic = when {
+            searchInProgress || feedMode == "Sense filtre" -> filtered
+            account == null && forYou.isEmpty() &&
+                chosenCategories.isEmpty() && chosenTowns.isEmpty() -> available
+            else -> forYou
+        }
         if (!searchInProgress && feedMode == "Sense filtre") {
             // Use the shared full catalog without first concatenating paid subsets (no duplicates).
             // An ongoing festival is dated by its next relevant day, without mutating its original ID.
@@ -583,6 +588,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                     }
                                 }
                             }
+                            EventList(visibleFeed, personalizedFeed.size,
+                                headerContent = {
                             // Contractual HEADER creative before batecs, as Android. No duplicate in LazyColumn.
                             SponsoredCarousel("Capçalera", paid.ads.filter { it.placement == "HEADER" },
                                 eventById, ::adViewed, ::adOpened, header = true)
@@ -751,17 +758,12 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                 Text("Filtres actius · ${filtered.size} resultats orgànics", fontSize = 11.sp,
                                     color = Color.DarkGray, modifier = Modifier.padding(horizontal = 16.dp))
                             }
-                            if (feedMode == "Per a tu" && account == null && chosenCategories.isEmpty() && chosenTowns.isEmpty()) {
-                                Text("Inicia sessió i seguix artistes o tria preferències per personalitzar el feed.",
-                                    fontSize = 13.sp, modifier = Modifier.padding(horizontal = 16.dp))
-                                TextButton(onClick = { loginOpen = true }) { Text("Iniciar sessió") }
-                            }
                             if (feedMode == "Per a tu" && account != null && !user.follows.any { it.type == "ARTIST" } && chosenCategories.isEmpty()) {
                                 Text("Seguix artistes o tria categories a Personalització.", modifier = Modifier.padding(horizontal = 16.dp), fontSize = 13.sp)
                             }
                             if (updating) LinearProgressIndicator(
                                 modifier = Modifier.fillMaxWidth().height(2.dp), color = Ink, trackColor = Accent)
-                            EventList(visibleFeed, personalizedFeed.size,
+                                },
                                 onLoadMore = { limit = IosUnfilteredFeedPolicy.nextCount(limit, personalizedFeed.size) },
                                 today = today,
                                 scrollContext = "${feedMode}|${appliedQuery}|${appliedSearchFilters.hashCode()}|${account?.id}",
@@ -1419,7 +1421,8 @@ private fun SponsoredCarousel(label: String, ads: List<IosAd>, eventById: Map<In
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun EventList(events: List<AgendaEventSummary>, total: Int, onLoadMore: () -> Unit,
+private fun EventList(events: List<AgendaEventSummary>, total: Int,
+                      headerContent: @Composable () -> Unit, onLoadMore: () -> Unit,
                       today: String, scrollContext: String,
                       savedIds: Set<Int>, onClick: (AgendaEventSummary) -> Unit,
                       onSave: (AgendaEventSummary) -> Unit, ads: List<IosAd>,
@@ -1451,6 +1454,7 @@ private fun EventList(events: List<AgendaEventSummary>, total: Int, onLoadMore: 
     PullToRefreshBox(isRefreshing = refreshing, onRefresh = onRefresh,
         modifier = Modifier.fillMaxSize(), indicator = {}) {
         LazyColumn(state = listState, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 5.dp)) {
+            item(key = "inici_header", contentType = "inici_header") { headerContent() }
             itemsIndexed(events, key = { _, ev -> ev.key }, contentType = { _, _ -> "event" }) { index, ev ->
                 Column {
                     if (GlobalAdPlacementPolicy.premiumAt(index, premium, normal)) {

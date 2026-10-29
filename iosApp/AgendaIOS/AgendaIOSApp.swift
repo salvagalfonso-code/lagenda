@@ -38,7 +38,9 @@ struct AgendaIOSApp: App {
     @UIApplicationDelegateAdaptor(AgendaPushDelegate.self) var pushDelegate
     var body: some Scene {
         WindowGroup {
-            ContentView().onAppear {
+            ContentView()
+                .preferredColorScheme(.light)
+                .onAppear {
                 let center = UNUserNotificationCenter.current()
                 center.getNotificationSettings { settings in
                     if settings.authorizationStatus == .notDetermined {

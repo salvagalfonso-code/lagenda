@@ -1,21 +1,56 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>CFBundleDevelopmentRegion</key><string>ca</string>
-<key>CFBundleDisplayName</key><string>l’Agenda</string>
-<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
-<key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-<key>CFBundleName</key><string>$(PRODUCT_NAME)</string>
-<key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.3.2</string>
-<key>CFBundleVersion</key><string>345</string>
-<key>CADisableMinimumFrameDurationOnPhone</key><true/>
-<key>AgendaGoogleIOSClientID</key><string>$(AGENDA_GOOGLE_IOS_CLIENT_ID)</string>
-<key>AgendaGoogleReversedClientID</key><string>$(AGENDA_GOOGLE_REVERSED_CLIENT_ID)</string>
-<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>GoogleOAuth</string><key>CFBundleURLSchemes</key><array><string>$(AGENDA_GOOGLE_REVERSED_CLIENT_ID)</string></array></dict></array>
-<key>NSCameraUsageDescription</key><string>Per validar entrades d’esdeveniments mitjançant el codi QR amb autorització del personal.</string>
-<key>LSRequiresIPhoneOS</key><true/>
-<key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
-<key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
-</dict></plist>
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>ca</string>
+	<key>CFBundleDisplayName</key>
+	<string>l’Agenda</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.3.2</string>
+	<key>CFBundleVersion</key>
+	<string>349</string>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>AgendaGoogleIOSClientID</key>
+	<string>$(AGENDA_GOOGLE_IOS_CLIENT_ID)</string>
+	<key>AgendaGoogleReversedClientID</key>
+	<string>$(AGENDA_GOOGLE_REVERSED_CLIENT_ID)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>GoogleOAuth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>$(AGENDA_GOOGLE_REVERSED_CLIENT_ID)</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Per validar entrades d’esdeveniments mitjançant el codi QR amb autorització del personal.</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict/>
+</dict>
+</plist>
