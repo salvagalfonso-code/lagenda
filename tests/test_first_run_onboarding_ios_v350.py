@@ -23,7 +23,7 @@ checks={
  'No mandatory login': 'Continuar sense usuari' in ui and 'onContinueGuest = ::completeFirstRun' in app,
  'Server confirmed follows trigger new feed calculation': 'if (account?.id == accountId && updatedOnServer)' in app and 'feedPrefsServerRevision += 1' in app,
  'Canonical entity photographs': 'IosPersonalizationImages.photo(entityImages' in ui and 'IosPersonalizationImages.ingest(api.entityStyles())' in app,
- 'Personalization can still be edited': 'if (prefOpen) IosPersonalizationScreen(' in app,
+ 'Personalization can still be edited': 'if (prefOpen && !prefSyncPending && prefSyncError.isBlank()) IosPersonalizationScreen(' in app,
  'Separate account categories and guest categories': 'iosScopedCacheKey("pref_categories", null)' in app and 'iosScopedCacheKey("pref_categories",accountId)' in app,
  'First-run no accidental reset of server record': 'if (account != null) return' in app and 'guestPending.isNotEmpty()' in app,
 }

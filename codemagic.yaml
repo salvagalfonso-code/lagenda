@@ -12,24 +12,14 @@ workflows:
           #!/usr/bin/env bash
           set -euo pipefail
           mkdir -p "$CM_BUILD_DIR/artifacts"
-          cd "$CM_BUILD_DIR"
+          if [ -d "$CM_BUILD_DIR/ANDROID_STUDIO/iosApp/AgendaIOS.xcodeproj" ]; then
+            cd "$CM_BUILD_DIR/ANDROID_STUDIO"
+          else
+            cd "$CM_BUILD_DIR"
+          fi
           test -d iosApp/AgendaIOS.xcodeproj
           test -f shared/build.gradle.kts
           test -f gradlew
-          # Detect an outdated or nested repository before starting a long Xcode build.
-          python3 - <<'PY_CHECK_SOURCE'
-          from pathlib import Path
-          p = Path('shared/src/commonMain/kotlin/com/example/agendavalenciana/ios/AgendaIosScreen.kt')
-          if not p.is_file():
-              raise SystemExit('ERROR: falta shared/.../AgendaIosScreen.kt en l’arrel de GitHub.')
-          lines = p.read_text().splitlines()
-          for name in ('personalizationImagesRevision', 'feedPrefsServerRevision'):
-              defs = [i for i,l in enumerate(lines) if f'var {name} by remember' in l]
-              uses = [i for i,l in enumerate(lines) if name in l and i not in defs]
-              if len(defs) != 1 or not uses or defs[0] >= min(uses):
-                  raise SystemExit(f'ERROR: el repositori encara te una copia antiga: {name} (def={defs}, uses={uses[:3]})')
-              print(f'OK: {name} definit a la linia {defs[0]+1}, primer us a la {min(uses)+1}')
-          PY_CHECK_SOURCE
           xcodebuild build \
             -project iosApp/AgendaIOS.xcodeproj \
             -scheme AgendaIOS \

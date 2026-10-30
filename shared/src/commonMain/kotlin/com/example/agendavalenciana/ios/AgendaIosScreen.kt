@@ -162,6 +162,10 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var registrationOpen by remember { mutableStateOf(false) }
     var resetOpen by remember { mutableStateOf(false) }
     var prefOpen by remember { mutableStateOf(false) }
+    // Account preferences must be re-read before showing a signed-in user's selections.
+    var prefSyncPending by remember { mutableStateOf(false) }
+    var prefSyncError by remember { mutableStateOf("") }
+    var prefRefreshEpoch by remember { mutableIntStateOf(0) }
     LaunchedEffect(prefOpen) {
         if (prefOpen && IosPersonalizationImages.cached().isEmpty()) {
             runCatching { IosPersonalizationImages.ingest(api.entityStyles()) }
@@ -183,6 +187,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     val followSyncMutex = remember { Mutex() }
     val feedPrefsSyncMutex = remember { Mutex() }
     var feedPrefsServerRevision by remember { mutableIntStateOf(0) }
+    // A remote GET must never overwrite an explicit category edit awaiting confirmation.
+    var categoryWriteRevision by remember { mutableIntStateOf(0) }
     // Android's account ∪ guest migration: first journal, then post missing follows.
     // Never clear a journal entry before a server response confirms it.
     fun stageGuestFollows(accountId: Int) {
@@ -386,6 +392,78 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             try { error = ""; action() } catch (e: Exception) { error = e.message ?: "No s'ha pogut completar l'operació." }
         }
     }
+    // User follows are the shared Android/iOS source of truth for account categories.
+    // Do not leave Personalització reading stale device-only selections after sign-in.
+    fun applyAccountCategoryFollows(accountId: Int, follows: List<IosFollow>) {
+        if (account?.id != accountId) return
+        // Keep locally edited choices until the matching POSTs have been acknowledged.
+        if (platformReadPublicCache(iosScopedCacheKey("pref_categories_dirty",accountId)) == "true") return
+        val keys = follows.asSequence()
+            .filter { it.type.equals("CATEGORY", ignoreCase = true) }
+            .map { IosPersonalizationTaxonomy.canonicalFollowKey(it.key) }
+            .toSet()
+        val validCats = IosPersonalizationTaxonomy.categories.map { it.code }.toSet() + "CHILDREN"
+        val validSubs = IosPersonalizationTaxonomy.subcategories.map { it.code }.toSet()
+        val cats = keys.intersect(validCats)
+        val subs = keys.intersect(validSubs)
+        // Preserve custom, non-taxonomy styles; standard category choices follow the server.
+        val extraStyles = chosenSubcategories.filterNot {
+            IosPersonalizationTaxonomy.canonicalFollowKey(it) in validSubs
+        }.toSet()
+        chosenCategories = cats
+        chosenSubcategories = subs + extraStyles
+        platformWritePublicCache(iosScopedCacheKey("pref_categories",accountId), IosAccountCachePolicy.encode(cats))
+        platformWritePublicCache(iosScopedCacheKey("pref_subcategories",accountId), IosAccountCachePolicy.encode(subs + extraStyles))
+    }
+    /** Resumable account-scoped category journal. Never mark synced after a failed POST.
+     * The server is authoritative again only after all edits and a fresh GET succeed.
+     */
+    suspend fun synchronizePendingCategories(accountId: Int) {
+        val dirtyKey = iosScopedCacheKey("pref_categories_dirty", accountId)
+        if (account?.id != accountId || platformReadPublicCache(dirtyKey) != "true") return
+        followSyncMutex.withLock {
+            if (account?.id != accountId || platformReadPublicCache(dirtyKey) != "true") return@withLock
+            val revision = categoryWriteRevision
+            val remote = runCatching { api.userState() }.getOrNull()
+            if (remote == null) {
+                if (account?.id == accountId) error = "Categories pendents: no es pot llegir el compte al servidor."
+                return@withLock
+            }
+            val validKeys = IosPersonalizationTaxonomy.categories.map { it.code }.toSet() +
+                IosPersonalizationTaxonomy.subcategories.map { it.code }.toSet() + "CHILDREN"
+            val desired = (iosScopedSet("pref_categories",accountId) + iosScopedSet("pref_subcategories",accountId))
+                .map(IosPersonalizationTaxonomy::canonicalFollowKey).filter { it in validKeys }.toSet()
+            val current = remote.follows.filter { it.type.equals("CATEGORY",true) }
+                .map { IosPersonalizationTaxonomy.canonicalFollowKey(it.key) }.toSet()
+            val operations = (current - desired).map { it to false } + (desired - current).map { it to true }
+            var failures = 0
+            for ((key, following) in operations) {
+                if (account?.id != accountId || categoryWriteRevision != revision) return@withLock
+                val label = IosPersonalizationTaxonomy.categoryLabel(key).let {
+                    if (it == key) IosPersonalizationTaxonomy.subcategoryLabel(key) else it
+                }
+                runCatching { api.followEntity("CATEGORY",key,label,following) }
+                    .onFailure { failures++ }
+            }
+            if (account?.id != accountId || categoryWriteRevision != revision) return@withLock
+            if (failures > 0) {
+                error = "$failures categories pendents de sincronització amb el servidor."
+                return@withLock
+            }
+            // A successful POST alone is not proof the account state was refreshed.
+            val confirmed = runCatching { api.userState() }.getOrNull()
+            if (confirmed == null) {
+                error = "Categories guardades, però falta confirmar-les amb el servidor."
+                return@withLock
+            }
+            platformWritePublicCache(dirtyKey,"false")
+            user = confirmed.copy(follows = guestFollowTransfer.preview(accountId,confirmed.follows))
+            applyAccountCategoryFollows(accountId,user.follows)
+            feedPrefsServerRevision += 1
+            platformWritePublicCache("for_you_${accountId}_signature","")
+        }
+    }
+
     fun refresh(force: Boolean = false) {
         if (updating) return
         val requestedAccountId = account?.id
@@ -399,7 +477,9 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                     val refreshedUser = runCatching { api.userState() }.getOrNull()
                     if (account?.id == requestedAccountId && refreshedUser != null) {
                         user = refreshedUser.copy(follows = guestFollowTransfer.preview(requestedAccountId, refreshedUser.follows))
+                        applyAccountCategoryFollows(requestedAccountId, user.follows)
                         synchronizeGuestFollows(requestedAccountId, refreshedUser.follows)
+                        synchronizePendingCategories(requestedAccountId)
                     }
                 }
                 val newPublications = runCatching { api.batecs(user.follows.filter { it.type.equals("ARTIST", true) }
@@ -451,29 +531,12 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         guestFollowTransfer.setGuest(nextFollows)
         user = user.copy(follows = nextFollows)
     }
-    // User follows are the shared Android/iOS source of truth for account categories.
-    // Do not leave Personalització reading stale device-only selections after sign-in.
-    fun applyAccountCategoryFollows(accountId: Int, follows: List<IosFollow>) {
-        if (account?.id != accountId) return
-        val keys = follows.asSequence()
-            .filter { it.type.equals("CATEGORY", ignoreCase = true) }
-            .map { IosPersonalizationTaxonomy.canonicalFollowKey(it.key) }
-            .toSet()
-        val validCats = IosPersonalizationTaxonomy.categories.map { it.code }.toSet() + "CHILDREN"
-        val validSubs = IosPersonalizationTaxonomy.subcategories.map { it.code }.toSet()
-        val cats = keys.intersect(validCats)
-        val subs = keys.intersect(validSubs)
-        // Preserve custom, non-taxonomy styles; standard category choices follow the server.
-        val extraStyles = chosenSubcategories.filterNot {
-            IosPersonalizationTaxonomy.canonicalFollowKey(it) in validSubs
-        }.toSet()
-        chosenCategories = cats
-        chosenSubcategories = subs + extraStyles
-        platformWritePublicCache(iosScopedCacheKey("pref_categories",accountId), IosAccountCachePolicy.encode(cats))
-        platformWritePublicCache(iosScopedCacheKey("pref_subcategories",accountId), IosAccountCachePolicy.encode(subs + extraStyles))
-    }
     suspend fun reconcileFeedPreferences(expectedAccount: Int, expectedRevision: Int, remote: IosServerFeedPreferences?) {
-        if (remote == null || account?.id != expectedAccount) return
+        if (account?.id != expectedAccount) return
+        if (remote == null) {
+            error = "No s'han pogut recuperar Suggerències, Descoberta i Idioma del servidor. Comprova l'API de preferències."
+            return
+        }
         val dirtyKey = iosScopedCacheKey("pref_feed_dirty", expectedAccount)
         val dirty = platformReadPublicCache(dirtyKey) == "true"
         if (feedPrefsWriteRevision != expectedRevision) return // a newer UI edit wins
@@ -506,7 +569,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             // Independent requests can run together. One slow mailbox must not delay tickets,
             // follows or saved lists; failed optional calls retain their previous contents.
             coroutineScope {
-                val userRequest = async { api.userState() }
+                // A failure in follows must not cancel the independent preferences requests.
+                val userRequest = async { runCatching { api.userState() }.getOrNull() }
                 val noticesRequest = async { runCatching { api.notifications() }.getOrNull() }
                 val ticketsRequest = async { runCatching { api.tickets() }.getOrNull() }
                 val groupsRequest = async { runCatching { api.community() }.getOrNull() }
@@ -524,8 +588,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 val newUser = userRequest.await()
                 // A session may be restored after the public catalog was loaded.
                 // Re-fetch the followed Batecs without clearing the existing strip on failure.
-                val newBatecs = runCatching { api.batecs(newUser.follows
-                    .filter { it.type.equals("ARTIST", true) }.map { it.label }.toSet()) }.getOrNull()
+                val newBatecs = newUser?.let { remoteState -> runCatching { api.batecs(remoteState.follows
+                    .filter { it.type.equals("ARTIST", true) }.map { it.label }.toSet()) }.getOrNull() }
                 val newNotices = noticesRequest.await()
                 val newTickets = ticketsRequest.await()
                 val newGroups = groupsRequest.await()
@@ -539,11 +603,21 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 val remoteVisibility = visibilityRequest.await()
                 // Never replace the new account's state with an old account's response.
                 if (account?.id == expectedAccount) {
-                    user = newUser.copy(follows = guestFollowTransfer.preview(expectedAccount, newUser.follows))
-                    applyAccountCategoryFollows(expectedAccount, user.follows)
+                    if (newUser != null) {
+                        user = newUser.copy(follows = guestFollowTransfer.preview(expectedAccount, newUser.follows))
+                        applyAccountCategoryFollows(expectedAccount, user.follows)
+                        // Migrate guest follows first, then replay pending account category edits.
+                        scope.launch {
+                            synchronizeGuestFollows(expectedAccount, newUser.follows)
+                            synchronizePendingCategories(expectedAccount)
+                        }
+                    } else {
+                        error = "No s'han pogut recuperar els seguiments del compte. Personalització pendent."
+                    }
                     reconcileFeedPreferences(expectedAccount, feedPrefsRevisionOnRequest, newFeedPreferences)
-                    // Send additions in the background, without blocking other account pages.
-                    scope.launch { synchronizeGuestFollows(expectedAccount, newUser.follows) }
+                    if (newPlaces == null) {
+                        error = "No s'han pogut recuperar els pobles, comarques i radis del servidor."
+                    }
                     newBatecs?.let { batecs = it }
                     newNotices?.let { notices = it }
                     newBells?.let { artistBells = it.filter { b -> b.enabled }.associateBy { b -> IosArtistBellPolicy.key(b.artistName) } }
@@ -630,6 +704,58 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                     newPresets?.let { searchPresets = it }
                 }
             }
+        }
+    }
+    // Both Android and iOS read user-state/mine.php, preferences/locations.php and
+    // preferences/feed.php.  Never present stale local account choices as confirmed.
+    LaunchedEffect(prefOpen, account?.id, prefRefreshEpoch) {
+        val expectedAccount = account?.id
+        if (!prefOpen || expectedAccount == null) return@LaunchedEffect
+        prefSyncPending = true
+        prefSyncError = ""
+        val categoriesRevision = categoryWriteRevision
+        val placesRevision = placesWriteRevision
+        val feedRevision = feedPrefsWriteRevision
+        try {
+            // Each request is independent.  An unavailable optional endpoint must not hide
+            // the successfully loaded categories or followed artists.
+            val remoteUser = runCatching { api.userState() }.getOrNull()
+            val remotePlaces = runCatching { api.locationPreferences() }.getOrNull()
+            val remoteFeed = runCatching { api.feedPreferences() }.getOrNull()
+            if (account?.id != expectedAccount || !prefOpen) return@LaunchedEffect
+            if (remoteUser != null) {
+                user = remoteUser.copy(follows = guestFollowTransfer.preview(expectedAccount,remoteUser.follows))
+                if (categoryWriteRevision == categoriesRevision) {
+                    applyAccountCategoryFollows(expectedAccount,user.follows)
+                }
+                if (platformReadPublicCache(iosScopedCacheKey("pref_categories_dirty",expectedAccount)) == "true") {
+                    synchronizePendingCategories(expectedAccount)
+                }
+            } else prefSyncError = "No s'han pogut llegir les categories i els seguiments del compte."
+            if (remotePlaces != null && remotePlaces.exists && placesRevision == placesWriteRevision &&
+                platformReadPublicCache(iosScopedCacheKey("pref_places_dirty",expectedAccount)) != "true") {
+                chosenTowns = remotePlaces.towns.keys
+                chosenRadii = remotePlaces.towns
+                chosenComarques = remotePlaces.comarques
+                platformWritePublicCache(iosScopedCacheKey("pref_towns",expectedAccount),
+                    IosAccountCachePolicy.encode(chosenTowns))
+                platformWritePublicCache(iosScopedCacheKey("pref_radii",expectedAccount),
+                    IosAccountCachePolicy.encode(IosPersonalFeedPolicy.encodeRadii(chosenRadii)))
+                platformWritePublicCache(iosScopedCacheKey("pref_comarques",expectedAccount),
+                    IosAccountCachePolicy.encode(chosenComarques))
+            } else if (remotePlaces == null) {
+                prefSyncError += " No s'han pogut llegir les ubicacions del servidor."
+            }
+            if (remoteFeed != null) {
+                reconcileFeedPreferences(expectedAccount,feedRevision,remoteFeed)
+            } else prefSyncError += " No s'han pogut llegir Suggerències, Descoberta i idioma."
+            if (prefSyncError.isBlank()) {
+                // The recomposition after this response uses the same account preferences
+                // that are passed to the shared for-you/feed.php selection.
+                feedPrefsServerRevision += 1
+            }
+        } finally {
+            if (account?.id == expectedAccount) prefSyncPending = false
         }
     }
     LaunchedEffect(Unit) {
@@ -1087,7 +1213,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     AgendaBrandLogo(Modifier.fillMaxWidth().widthIn(max = 175.dp).height(58.dp))
                 }
-                AgendaTopAction("sliders", onClick = { prefOpen = true })
+                AgendaTopAction("sliders", onClick = { prefSyncPending = account != null; prefSyncError = ""; prefOpen = true; prefRefreshEpoch++ })
                 AgendaTopAction("bell", onClick = {
                     notificationsOpen = true
                     if (account != null) loadAccountPages()
@@ -1517,7 +1643,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                     val expected = account?.id
                                     work { val next = api.profileSettings(); if (account?.id == expected) profileSettings = next }
                                 },
-                                onOpenPersonalization = { prefOpen = true },
+                                onOpenPersonalization = { prefSyncPending = account != null; prefSyncError = ""; prefOpen = true; prefRefreshEpoch++ },
                                 onOpenNotificationSettings = { sessionBridge?.showNotificationSettings() },
                                 onOpenLanguageSettings = { sessionBridge?.showNotificationSettings() },
                                 onDeleteAccount = { deleteAccountOpen = true },
@@ -1686,7 +1812,26 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 myProfile = runCatching { api.myPublicProfile() }.getOrNull()
             }
         })
-        if (prefOpen) IosPersonalizationScreen(
+        if (prefOpen && account != null && (prefSyncPending || prefSyncError.isNotBlank())) {
+            AlertDialog(
+                onDismissRequest = { prefOpen = false },
+                title = { Text("Sincronització de Personalització") },
+                text = { Text(if (prefSyncPending) "Recuperant les seleccions del compte…" else
+                    "${prefSyncError.trim()} Les preferències locals poden ser diferents d'Android.") },
+                confirmButton = {
+                    if (!prefSyncPending) TextButton(onClick = {
+                        prefSyncError = ""; prefSyncPending = true; prefRefreshEpoch++
+                    }) { Text("Reintentar") }
+                },
+                dismissButton = {
+                    TextButton(onClick = {
+                        if (prefSyncPending) prefOpen = false
+                        else prefSyncError = "" // Explicitly allow an offline-local view.
+                    }) { Text(if (prefSyncPending) "Tancar" else "Veure dades locals") }
+                }
+            )
+        }
+        if (prefOpen && !prefSyncPending && prefSyncError.isBlank()) IosPersonalizationScreen(
             categories = chosenCategories, towns = chosenTowns,
             hiddenEventIds = excludedEventIds, hiddenArtists = excludedArtists,
             hiddenCategories = excludedCategories, events = available,
@@ -1760,14 +1905,13 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                         key == "CHILDREN" ||
                         IosPersonalizationTaxonomy.subcategories.any { it.code == key }
                 }.toSet()
-                val serverKeys = user.follows.filter { it.type.equals("CATEGORY",true) }
-                    .map { IosPersonalizationTaxonomy.canonicalFollowKey(it.key) }.toSet()
                 val oldHiddenEvents = excludedEventIds
                 val oldHiddenArtists = excludedArtists
                 val oldHiddenCategories = excludedCategories
                 val visibilityChanged = oldHiddenEvents != hiddenEvents || oldHiddenArtists != hiddenArtists ||
                     oldHiddenCategories != hiddenCategories
                 if (visibilityChanged) visibilityWriteRevision += 1
+                val categoriesChanged = cats != chosenCategories || styles != chosenSubcategories
                 val placesChanged = towns != chosenTowns || comarques != chosenComarques || radii != chosenRadii
                 chosenCategories = cats; chosenTowns = towns
                 chosenSubcategories = styles; chosenComarques = comarques; chosenRadii = radii
@@ -1797,6 +1941,10 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                             platformWritePublicCache(dirtyKey,"false")
                         if (failures > 0) error = "${failures} bloquejos no s'han sincronitzat. S'han guardat a iPhone."
                     }
+                }
+                if (accountId != null && categoriesChanged) {
+                    categoryWriteRevision += 1
+                    platformWritePublicCache(iosScopedCacheKey("pref_categories_dirty",accountId),"true")
                 }
                 platformWritePublicCache(iosScopedCacheKey("pref_categories",accountId), IosAccountCachePolicy.encode(cats))
                 platformWritePublicCache(iosScopedCacheKey("pref_towns",accountId), IosAccountCachePolicy.encode(towns))
@@ -1849,28 +1997,11 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                     guestFollowTransfer.setGuest(merged)
                     user = user.copy(follows = merged)
                 }
-                if (accountId != null && nextKeys != serverKeys) work {
-                    // Persist changes through the same user-state/follow.php service as Android.
-                    val removals = serverKeys - nextKeys
-                    val additions = nextKeys - serverKeys
-                    val outcomes = (removals.map { it to false } + additions.map { it to true })
-                    var failed = 0
-                    followSyncMutex.withLock {
-                        for ((key, following) in outcomes) {
-                            if (account?.id != accountId) break
-                            val label = IosPersonalizationTaxonomy.categoryLabel(key).let { if (it == key)
-                                IosPersonalizationTaxonomy.subcategoryLabel(key) else it }
-                            runCatching { api.followEntity("CATEGORY",key,label,following) }
-                                .onSuccess {
-                                    if (account?.id == accountId) {
-                                        if (!following) guestFollowTransfer.acknowledge(accountId,IosFollow("CATEGORY",key,label))
-                                        user = user.copy(follows = IosFollowMutation.updated(
-                                            user.follows,"CATEGORY",key,label,following))
-                                    }
-                                }.onFailure { failed++ }
-                        }
-                    }
-                    if (failed > 0) error = "$failed seguiments de categoria no s'han sincronitzat amb el servidor."
+                if (accountId != null && (categoriesChanged ||
+                    platformReadPublicCache(iosScopedCacheKey("pref_categories_dirty",accountId)) == "true")) work {
+                    // Same server follow.php as Android. Dirty state survives a failed request
+                    // and is retried after the next sign-in or account refresh.
+                    synchronizePendingCategories(accountId)
                 }
                 status = "Preferències actualitzades"
             }
