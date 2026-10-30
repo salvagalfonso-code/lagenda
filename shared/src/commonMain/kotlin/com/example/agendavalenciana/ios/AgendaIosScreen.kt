@@ -138,6 +138,26 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var appliedSearchFilters by remember { mutableStateOf(IosSearchFilters()) }
     var searchPresets by remember { mutableStateOf(emptyList<IosSavedSearch>()) }
     var loginOpen by remember { mutableStateOf(false) }
+    // Shown only after an anonymous first launch, never after signing out of an existing account.
+    val initialGuestOnboardingEligible = remember {
+        platformReadPublicCache("ios_first_run_state_v350") == "offered" ||
+            (platformReadPublicCache("ios_first_run_state_v350").isBlank() &&
+             platformReadPublicCache("events_at").isBlank() &&
+             platformReadPublicCache(IosGuestFollowTransfer.GUEST_KEY).isBlank() &&
+             platformReadPublicCache(iosScopedCacheKey("pref_categories", null)).isBlank() &&
+             platformReadPublicCache(iosScopedCacheKey("pref_towns", null)).isBlank())
+    }
+    var firstRunOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(firstRunOpen) {
+        if (firstRunOpen && IosPersonalizationImages.cached().isEmpty()) {
+            runCatching { IosPersonalizationImages.ingest(api.entityStyles()) }
+                .onSuccess { personalizationImagesRevision++ }
+        }
+    }
+    fun completeFirstRun() {
+        platformWritePublicCache("ios_first_run_state_v350", "done")
+        firstRunOpen = false
+    }
     var registrationOpen by remember { mutableStateOf(false) }
     var resetOpen by remember { mutableStateOf(false) }
     var prefOpen by remember { mutableStateOf(false) }
@@ -161,6 +181,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var user by remember { mutableStateOf(guestUserState()) }
     var account by remember { mutableStateOf<IosAccount?>(null) }
     val followSyncMutex = remember { Mutex() }
+    val feedPrefsSyncMutex = remember { Mutex() }
     // Android's account ∪ guest migration: first journal, then post missing follows.
     // Never clear a journal entry before a server response confirms it.
     fun stageGuestFollows(accountId: Int) {
@@ -181,7 +202,34 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             platformWritePublicCache(iosScopedCacheKey("pref_subcategories",null), "~")
         }
     }
+    // Stage anonymous first-run locations before switching scopes. The account and guest
+    // locations remain isolated and failed writes stay pending for the next login.
+    fun stageGuestFirstRunPlaces(accountId: Int) {
+        if (accountId <= 0) return
+        val guestTowns = iosScopedSet("pref_towns", null)
+        if (guestTowns.isEmpty()) return
+        val guestRadii = IosPersonalFeedPolicy.decodeRadii(iosScopedSet("pref_radii", null))
+        val accountTowns = iosScopedSet("pref_towns", accountId)
+        val accountRadii = IosPersonalFeedPolicy.decodeRadii(iosScopedSet("pref_radii", accountId))
+        val pendingTowns = iosScopedSet("intro_pending_towns", accountId) + guestTowns
+        val mergedRadii = accountRadii + guestTowns.associateWith {
+            guestRadii[it] ?: PersonalizationOptions.defaultRadiusKm
+        }
+        platformWritePublicCache(iosScopedCacheKey("intro_pending_towns", accountId),
+            IosAccountCachePolicy.encode(pendingTowns))
+        platformWritePublicCache(iosScopedCacheKey("pref_towns", accountId),
+            IosAccountCachePolicy.encode(accountTowns + guestTowns))
+        platformWritePublicCache(iosScopedCacheKey("pref_radii", accountId),
+            IosAccountCachePolicy.encode(IosPersonalFeedPolicy.encodeRadii(mergedRadii)))
+        platformWritePublicCache(iosScopedCacheKey("pref_places_dirty", accountId), "true")
+        // Clear guest only after the account-scoped journal has round-tripped.
+        if (guestTowns.all { it in iosScopedSet("intro_pending_towns", accountId) }) {
+            platformWritePublicCache(iosScopedCacheKey("pref_towns", null), "~")
+            platformWritePublicCache(iosScopedCacheKey("pref_radii", null), "~")
+        }
+    }
     suspend fun synchronizeGuestFollows(accountId: Int, remoteFollows: List<IosFollow>) {
+        var updatedOnServer = false
         followSyncMutex.withLock {
             if (account?.id != accountId) return@withLock
             // A remote read may already contain a previous successful POST.
@@ -194,8 +242,17 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 if (account?.id != accountId) break
                 // Continue with later entities even when one post fails.
                 val confirmed = runCatching { api.followEntity(follow.type, follow.key, follow.label, true) }.isSuccess
-                if (confirmed) guestFollowTransfer.acknowledge(accountId, follow)
+                if (confirmed) {
+                    guestFollowTransfer.acknowledge(accountId, follow)
+                    updatedOnServer = true
+                }
             }
+        }
+        if (account?.id == accountId && updatedOnServer) {
+            // Registered users' category follows are read from MariaDB by for-you/feed.php.
+            // Rerun that selection only after follow.php confirms the server-side update.
+            feedPrefsServerRevision += 1
+            platformWritePublicCache("for_you_${accountId}_signature", "")
         }
         if (account?.id == accountId && guestFollowTransfer.pending(accountId).isNotEmpty())
             status = "Alguns seguiments encara estan pendents de sincronitzar"
@@ -246,8 +303,11 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var chosenComarques by remember { mutableStateOf(iosScopedSet("pref_comarques", null)) }
     var chosenRadii by remember { mutableStateOf(IosPersonalFeedPolicy.decodeRadii(iosScopedSet("pref_radii", null))) }
     var placesWriteRevision by remember { mutableIntStateOf(0) }
+    var feedPrefsWriteRevision by remember { mutableIntStateOf(0) }
+    var feedPrefsServerRevision by remember { mutableIntStateOf(0) }
+
     var visibilityWriteRevision by remember { mutableIntStateOf(0) }
-    var showSuggestions by remember { mutableStateOf(platformReadPublicCache(iosScopedCacheKey("pref_suggestions",null)) == "true") }
+    var showSuggestions by remember { mutableStateOf(platformReadPublicCache(iosScopedCacheKey("pref_suggestions",null)) != "false") }
     var valencianFirst by remember { mutableStateOf(platformReadPublicCache(iosScopedCacheKey("pref_valencian",null)) != "false") }
     var discoveryLevel by remember { mutableStateOf(DiscoveryLevel.BALANCED) }
     var learningResetRevision by remember { mutableIntStateOf(0) }
@@ -358,13 +418,87 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         chosenSubcategories = iosScopedSet("pref_subcategories", id)
         chosenComarques = iosScopedSet("pref_comarques", id)
         chosenRadii = IosPersonalFeedPolicy.decodeRadii(iosScopedSet("pref_radii",id))
-        showSuggestions = platformReadPublicCache(iosScopedCacheKey("pref_suggestions",id)) == "true"
+        showSuggestions = platformReadPublicCache(iosScopedCacheKey("pref_suggestions",id)) != "false"
         valencianFirst = platformReadPublicCache(iosScopedCacheKey("pref_valencian",id)) != "false"
         discoveryLevel = runCatching { DiscoveryLevel.valueOf(platformReadPublicCache(iosScopedCacheKey("pref_discovery",id))) }.getOrDefault(DiscoveryLevel.BALANCED)
 
         excludedEventIds = iosScopedSet("hidden_events", id).mapNotNull(String::toIntOrNull).toSet()
         excludedArtists = iosScopedSet("hidden_artists", id)
         excludedCategories = iosScopedSet("hidden_categories", id)
+    }
+    // First-run and Personalització share the exact same guest state and follow migration.
+    // A subcategory selection narrows the parent discipline; it does not imply the whole category.
+    fun saveGuestFirstRun(cats: Set<String>, styles: Set<String>, locations: Map<String, Int>, artists: Set<String>) {
+        if (account != null) return
+        val followKeys = IosFirstRunPolicy.followKeys(cats, styles)
+        chosenCategories = followKeys.intersect(IosFirstRunPolicy.disciplines.toSet())
+        chosenSubcategories = followKeys.filter { it.contains("__") }.toSet()
+        chosenTowns = locations.keys
+        chosenRadii = locations.mapValues { PersonalizationOptions.validRadius(it.value) }
+        platformWritePublicCache(iosScopedCacheKey("pref_categories", null), IosAccountCachePolicy.encode(chosenCategories))
+        platformWritePublicCache(iosScopedCacheKey("pref_subcategories", null), IosAccountCachePolicy.encode(chosenSubcategories))
+        platformWritePublicCache(iosScopedCacheKey("pref_towns", null), IosAccountCachePolicy.encode(chosenTowns))
+        platformWritePublicCache(iosScopedCacheKey("pref_radii", null),
+            IosAccountCachePolicy.encode(IosPersonalFeedPolicy.encodeRadii(chosenRadii)))
+        val rest = user.follows.filterNot { it.type.equals("CATEGORY",true) || it.type.equals("ARTIST",true) }
+        val categoryFollows = followKeys.map { key ->
+            val label = if (key.contains("__")) IosPersonalizationTaxonomy.subcategoryLabel(key)
+                else IosPersonalizationTaxonomy.categoryLabel(key)
+            IosFollow("CATEGORY",key,label)
+        }
+        val artistFollows = artists.map { IosFollow("ARTIST",it,it) }
+        val nextFollows = IosGuestFollowTransfer.union(rest, categoryFollows + artistFollows)
+        guestFollowTransfer.setGuest(nextFollows)
+        user = user.copy(follows = nextFollows)
+    }
+    // User follows are the shared Android/iOS source of truth for account categories.
+    // Do not leave Personalització reading stale device-only selections after sign-in.
+    fun applyAccountCategoryFollows(accountId: Int, follows: List<IosFollow>) {
+        if (account?.id != accountId) return
+        val keys = follows.asSequence()
+            .filter { it.type.equals("CATEGORY", ignoreCase = true) }
+            .map { IosPersonalizationTaxonomy.canonicalFollowKey(it.key) }
+            .toSet()
+        val validCats = IosPersonalizationTaxonomy.categories.map { it.code }.toSet() + "CHILDREN"
+        val validSubs = IosPersonalizationTaxonomy.subcategories.map { it.code }.toSet()
+        val cats = keys.intersect(validCats)
+        val subs = keys.intersect(validSubs)
+        // Preserve custom, non-taxonomy styles; standard category choices follow the server.
+        val extraStyles = chosenSubcategories.filterNot {
+            IosPersonalizationTaxonomy.canonicalFollowKey(it) in validSubs
+        }.toSet()
+        chosenCategories = cats
+        chosenSubcategories = subs + extraStyles
+        platformWritePublicCache(iosScopedCacheKey("pref_categories",accountId), IosAccountCachePolicy.encode(cats))
+        platformWritePublicCache(iosScopedCacheKey("pref_subcategories",accountId), IosAccountCachePolicy.encode(subs + extraStyles))
+    }
+    suspend fun reconcileFeedPreferences(expectedAccount: Int, expectedRevision: Int, remote: IosServerFeedPreferences?) {
+        if (remote == null || account?.id != expectedAccount) return
+        val dirtyKey = iosScopedCacheKey("pref_feed_dirty", expectedAccount)
+        val dirty = platformReadPublicCache(dirtyKey) == "true"
+        if (feedPrefsWriteRevision != expectedRevision) return // a newer UI edit wins
+        if (dirty || !remote.exists) {
+            // For old accounts seed their account-local choices exactly once; persist offline edits.
+            feedPrefsSyncMutex.withLock {
+                if (account?.id != expectedAccount || feedPrefsWriteRevision != expectedRevision) return@withLock
+                runCatching { api.saveFeedPreferences(showSuggestions, discoveryLevel.name, valencianFirst) }
+                    .onSuccess { if (account?.id == expectedAccount && feedPrefsWriteRevision == expectedRevision) {
+                        platformWritePublicCache(dirtyKey,"false")
+                        feedPrefsServerRevision += 1
+                    } }
+                    .onFailure { if (account?.id == expectedAccount) {
+                        platformWritePublicCache(dirtyKey,"true")
+                        error = "Preferències de Per a tu pendents de sincronització: ${it.message.orEmpty()}"
+                    } }
+            }
+        } else {
+            showSuggestions = remote.suggestions
+            valencianFirst = remote.valencianFirst
+            discoveryLevel = runCatching { DiscoveryLevel.valueOf(remote.discovery) }.getOrDefault(DiscoveryLevel.BALANCED)
+            platformWritePublicCache(iosScopedCacheKey("pref_suggestions",expectedAccount),showSuggestions.toString())
+            platformWritePublicCache(iosScopedCacheKey("pref_discovery",expectedAccount),discoveryLevel.name)
+            platformWritePublicCache(iosScopedCacheKey("pref_valencian",expectedAccount),valencianFirst.toString())
+        }
     }
     fun loadAccountPages() {
         val expectedAccount = account?.id ?: return
@@ -381,6 +515,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 val listsRequest = async { runCatching { api.savedLists() }.getOrNull() }
                 val presetsRequest = async { runCatching { api.savedSearches() }.getOrNull() }
                 val bellsRequest = async { runCatching { api.artistBells() }.getOrNull() }
+                val feedPrefsRevisionOnRequest = feedPrefsWriteRevision
+                val feedPrefsRequest = async { runCatching { api.feedPreferences() }.getOrNull() }
                 val placesRevisionOnRequest = placesWriteRevision
                 val placesRequest = async { runCatching { api.locationPreferences() }.getOrNull() }
                 val visibilityRevisionOnRequest = visibilityWriteRevision
@@ -398,11 +534,14 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 val newSavedLists = listsRequest.await()
                 val newPresets = presetsRequest.await()
                 val newBells = bellsRequest.await()
+                val newFeedPreferences = feedPrefsRequest.await()
                 val newPlaces = placesRequest.await()
                 val remoteVisibility = visibilityRequest.await()
                 // Never replace the new account's state with an old account's response.
                 if (account?.id == expectedAccount) {
                     user = newUser.copy(follows = guestFollowTransfer.preview(expectedAccount, newUser.follows))
+                    applyAccountCategoryFollows(expectedAccount, user.follows)
+                    reconcileFeedPreferences(expectedAccount, feedPrefsRevisionOnRequest, newFeedPreferences)
                     // Send additions in the background, without blocking other account pages.
                     scope.launch { synchronizeGuestFollows(expectedAccount, newUser.follows) }
                     newBatecs?.let { batecs = it }
@@ -441,12 +580,35 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                     if (newPlaces != null && placesWriteRevision == placesRevisionOnRequest) {
                         val dirtyKey = iosScopedCacheKey("pref_places_dirty",expectedAccount)
                         if (platformReadPublicCache(dirtyKey) == "true") {
-                            // An offline edit wins over an older server snapshot.
-                            runCatching { api.saveLocationPreferences(chosenTowns.associateWith {
+                            val guestPending = iosScopedSet("intro_pending_towns", expectedAccount)
+                            // For onboarding, union the existing account's remote places and the
+                            // locally staged guest places. Do not overwrite a returning user's towns.
+                            val sendRadii = if (guestPending.isNotEmpty()) {
+                                val remote = if (newPlaces.exists) newPlaces.towns else emptyMap()
+                                remote + chosenTowns.associateWith { town ->
+                                    chosenRadii[town] ?: PersonalizationOptions.defaultRadiusKm
+                                }
+                            } else chosenTowns.associateWith {
                                 chosenRadii[it] ?: PersonalizationOptions.defaultRadiusKm
-                            }, chosenComarques) }.onSuccess {
-                                if (account?.id == expectedAccount && placesWriteRevision == placesRevisionOnRequest)
+                            }
+                            val sendComarques = if (guestPending.isNotEmpty() && newPlaces.exists)
+                                newPlaces.comarques + chosenComarques else chosenComarques
+                            if (guestPending.isNotEmpty()) {
+                                chosenTowns = sendRadii.keys
+                                chosenRadii = sendRadii
+                                chosenComarques = sendComarques
+                            }
+                            runCatching { api.saveLocationPreferences(sendRadii, sendComarques) }.onSuccess {
+                                if (account?.id == expectedAccount && placesWriteRevision == placesRevisionOnRequest) {
                                     platformWritePublicCache(dirtyKey,"false")
+                                    platformWritePublicCache(iosScopedCacheKey("intro_pending_towns", expectedAccount), "~")
+                                    platformWritePublicCache(iosScopedCacheKey("pref_towns", expectedAccount),
+                                        IosAccountCachePolicy.encode(sendRadii.keys))
+                                    platformWritePublicCache(iosScopedCacheKey("pref_radii", expectedAccount),
+                                        IosAccountCachePolicy.encode(IosPersonalFeedPolicy.encodeRadii(sendRadii)))
+                                    platformWritePublicCache(iosScopedCacheKey("pref_comarques", expectedAccount),
+                                        IosAccountCachePolicy.encode(sendComarques))
+                                }
                             }
                         } else if (newPlaces.exists) {
                             chosenTowns = newPlaces.towns.keys
@@ -474,9 +636,17 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         refresh(false)
         val restored = api.restoreAccount()
         awaitingInitialAccount = restored == null && !api.token.isNullOrBlank()
+        if (restored == null && api.token.isNullOrBlank() && initialGuestOnboardingEligible &&
+            platformReadPublicCache("ios_first_run_state_v350") != "done") {
+            platformWritePublicCache("ios_first_run_state_v350", "offered")
+            firstRunOpen = true
+        }
         if (restored != null) {
+            // A recognised returning user should never see anonymous onboarding after logout.
+            platformWritePublicCache("ios_first_run_state_v350", "done")
             account = restored
             stageGuestFollows(restored.id)
+            stageGuestFirstRunPlaces(restored.id)
             user = user.copy(follows = guestFollowTransfer.preview(restored.id, emptyList()))
             useAccountPreferences(restored.id); loadAccountPages()
             myProfile = runCatching { api.myPublicProfile() }.getOrNull()
@@ -659,10 +829,22 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     val selectedForYou by produceState<Pair<Int?, List<AgendaEventSummary>>>(
         initialValue = null to emptyList(), available, account?.id, user.follows,
         chosenCategories, chosenTowns, chosenSubcategories, chosenComarques, chosenRadii,
-        showSuggestions, discoveryLevel, valencianFirst, paid, entityStyles, learningResetRevision
+        showSuggestions, discoveryLevel, valencianFirst, paid, entityStyles, learningResetRevision, feedPrefsServerRevision
     ) {
         val owner = account?.id
-        val result = withContext(Dispatchers.Default) {
+        // Never independently select events when the shared server endpoint is working.
+        // Only recover the historical offline snapshot if the server is unavailable.
+        val serverIds = runCatching {
+            api.serverForYouIds(chosenCategories, chosenSubcategories, chosenTowns,
+                chosenComarques, chosenRadii, showSuggestions, discoveryLevel.name,
+                valencianFirst, user.follows)
+        }.getOrNull()
+        val result = if (serverIds != null) {
+            withContext(Dispatchers.Default) {
+                val lookup = available.groupBy { it.id }
+                serverIds.flatMap { lookup[it].orEmpty() }.distinctBy { it.key }
+            }
+        } else withContext(Dispatchers.Default) {
             IosForYouSnapshot.select(available, owner, user, chosenCategories, chosenTowns, paid,
                 chosenSubcategories, chosenComarques, chosenRadii, showSuggestions,
                 discoveryLevel, valencianFirst, entityStyles)
@@ -1392,6 +1574,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             work {
                 account = api.registerAccount(username, email, password)
                 stageGuestFollows(account!!.id)
+                stageGuestFirstRunPlaces(account!!.id)
                 profileSettings = null
                 user = IosUserState(follows = guestFollowTransfer.preview(account!!.id, emptyList())); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null
                 useAccountPreferences(account?.id)
@@ -1475,6 +1658,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                         val next = api.signInWithProvider(provider, idToken, nonce)
                         account = next
                         stageGuestFollows(next.id)
+                        stageGuestFirstRunPlaces(next.id)
                         profileSettings = null
                         user = IosUserState(follows = guestFollowTransfer.preview(next.id, emptyList())); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList()
                         groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null
@@ -1493,6 +1677,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             work {
                 account = api.signIn(login, password)
                 stageGuestFollows(account!!.id)
+                stageGuestFirstRunPlaces(account!!.id)
                 profileSettings = null
                 user = IosUserState(follows = guestFollowTransfer.preview(account!!.id, emptyList())); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null
                 useAccountPreferences(account?.id)
@@ -1587,6 +1772,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 chosenCategories = cats; chosenTowns = towns
                 chosenSubcategories = styles; chosenComarques = comarques; chosenRadii = radii
                 if (placesChanged) placesWriteRevision += 1
+                val feedPrefsChanged = showSuggestions != suggestions || discoveryLevel != discovery || valencianFirst != valencian
+                if (feedPrefsChanged) feedPrefsWriteRevision += 1
                 showSuggestions = suggestions; discoveryLevel = discovery; valencianFirst = valencian
                 saveExclusions(hiddenEvents, hiddenArtists, hiddenCategories)
                 if (accountId != null && visibilityChanged) {
@@ -1619,6 +1806,25 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 platformWritePublicCache(iosScopedCacheKey("pref_suggestions",accountId),suggestions.toString())
                 platformWritePublicCache(iosScopedCacheKey("pref_discovery",accountId),discovery.name)
                 platformWritePublicCache(iosScopedCacheKey("pref_valencian",accountId),valencian.toString())
+                if (accountId != null && (feedPrefsChanged || platformReadPublicCache(iosScopedCacheKey("pref_feed_dirty", accountId)) == "true")) {
+                    val revision = feedPrefsWriteRevision
+                    val dirtyKey = iosScopedCacheKey("pref_feed_dirty",accountId)
+                    platformWritePublicCache(dirtyKey,"true")
+                    work {
+                        feedPrefsSyncMutex.withLock {
+                            if (account?.id != accountId) return@withLock
+                            // Always persist the latest draft, not an earlier rapid tap's payload.
+                            val latestRevision = feedPrefsWriteRevision
+                            runCatching { api.saveFeedPreferences(showSuggestions,discoveryLevel.name,valencianFirst) }
+                                .onSuccess { if (account?.id == accountId && latestRevision == feedPrefsWriteRevision) {
+                                    platformWritePublicCache(dirtyKey,"false")
+                                    feedPrefsServerRevision += 1
+                                } }
+                                .onFailure { if (account?.id == accountId)
+                                    error = "Preferències de Per a tu guardades en iPhone, pendents de servidor: ${it.message.orEmpty()}" }
+                        }
+                    }
+                }
                 if (accountId != null && placesChanged) {
                     val revision = placesWriteRevision
                     val dirtyKey = iosScopedCacheKey("pref_places_dirty",accountId)
@@ -1934,6 +2140,23 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         alertToDisable?.let { ev -> AlertDialog(onDismissRequest = { alertToDisable = null }, title = { Text("Vols desactivar este recordatori?") },
             text = { Text(ev.title) }, dismissButton = { TextButton(onClick = { alertToDisable = null }) { Text("Mantindre") } },
             confirmButton = { TextButton(onClick = { toggleReminder(ev, false); alertToDisable = null }) { Text("Desactivar") } }) }
+    }
+    if (firstRunOpen && account == null) {
+        IosFirstRunOnboardingDialog(
+            initialCategories = (chosenCategories + chosenSubcategories.mapNotNull { sub ->
+                IosPersonalizationTaxonomy.subcategories.firstOrNull { it.code == sub }?.categoryCode
+            }).intersect(IosFirstRunPolicy.disciplines.toSet()),
+            initialSubcategories = chosenSubcategories,
+            initialLocations = chosenTowns.associateWith { chosenRadii[it] ?: PersonalizationOptions.defaultRadiusKm },
+            initialArtists = user.follows.filter { it.type.equals("ARTIST",true) }.map { it.label }.toSet(),
+            events = events,
+            entityImages = remember(personalizationImagesRevision) { IosPersonalizationImages.cached() },
+            onDraftChanged = ::saveGuestFirstRun,
+            onSkip = ::completeFirstRun,
+            onContinueGuest = ::completeFirstRun,
+            onLogin = { completeFirstRun(); loginOpen = true },
+            onRegister = { completeFirstRun(); registrationOpen = true }
+        )
     }
 }
 

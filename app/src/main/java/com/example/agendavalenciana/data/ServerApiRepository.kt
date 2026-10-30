@@ -1461,6 +1461,18 @@ object ServerApiRepository {
         return clean.mapNotNull(byId::get)
     }
 
+    /** One shared server calculator for Android and iOS; unlike index.php this is
+     * NOT an uploaded Android snapshot. Null/failure means use the offline fallback.
+     */
+    fun computeSharedForYou(context: Context, preferences: JSONObject, guestFollows: JSONArray): Result<List<Int>> = runCatching {
+        val request = JSONObject().put("preferences", preferences).put("follows", guestFollows)
+        val root = jsonRequest("for-you/feed.php", "POST", request, token(context))
+        check(root.optBoolean("calculated_on_server", false)) { "El servidor no ha calculat Per a tu" }
+        val array = root.optJSONArray("ids") ?: error("Falta la selecció del servidor")
+        (0 until array.length()).mapNotNull { i -> array.optInt(i).takeIf { it > 0 } }
+            .distinct().take(10000)
+    }
+
     data class PreparedForYouServerCache(val ids: List<Int>, val fresh: Boolean)
 
     /** Caché per compte: només IDs, mai dades de perfil ni cartells. Opcional;
@@ -5048,6 +5060,30 @@ object ServerApiRepository {
         }.getOrElse { if (target.exists()) Uri.fromFile(target).toString() else null }
     }
 
+
+    /** Same preferences/feed.php route that iOS uses; never pass a user id in requests. */
+    data class ServerFeedPreferences(val suggestions: Boolean, val discovery: String,
+        val valencianFirst: Boolean, val exists: Boolean)
+
+    private fun parseServerFeedPreferences(root: JSONObject): ServerFeedPreferences {
+        val p = root.getJSONObject("preferences")
+        val level = p.optString("discovery", "BALANCED").takeIf {
+            it in setOf("MY_TASTES","BALANCED","EXPLORE") } ?: "BALANCED"
+        return ServerFeedPreferences(p.optBoolean("suggestions",true),level,
+            p.optBoolean("valencian_first",true),root.optBoolean("exists",false))
+    }
+    fun fetchFeedPreferences(sessionToken: String): Result<ServerFeedPreferences> = runCatching {
+        parseServerFeedPreferences(jsonRequest("preferences/feed.php", "GET", JSONObject(), sessionToken))
+    }
+    fun saveFeedPreferences(sessionToken: String, suggestions: Boolean,
+        discovery: String, valencianFirst: Boolean): Result<ServerFeedPreferences> = runCatching {
+        val body = JSONObject().put("preferences", JSONObject()
+            .put("suggestions", suggestions).put("discovery", discovery)
+            .put("valencian_first", valencianFirst))
+        val parsed = parseServerFeedPreferences(jsonRequest("preferences/feed.php", "POST", body, sessionToken))
+        require(parsed.exists) { "El servidor no ha confirmat les preferències." }
+        parsed
+    }
 
     /** Llocs guardats al compte MySQL. No hi ha ID d'usuari al payload: el resol el Bearer. */
     data class ServerLocationPreferences(

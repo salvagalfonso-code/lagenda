@@ -99,6 +99,56 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
         require(root.bool("ok")) { root.text("message", "error").ifBlank { "HTTP ${response.status.value}" } }
         return root
     }
+    /** Shared PHP engine: Android and iOS request the SAME calculated server IDs.
+     * A present empty list is a valid server result, not a cache miss.
+     */
+    suspend fun serverForYouIds(
+        categories: Set<String>, subcategories: Set<String>, towns: Set<String>,
+        comarques: Set<String>, radii: Map<String, Int>, suggestions: Boolean,
+        discovery: String, valencianFirst: Boolean, follows: List<IosFollow>
+    ): List<Int> {
+        fun strings(input: Collection<String>) = JsonArray(input.sorted().map { JsonPrimitive(it) })
+        val root = request("for-you/feed.php", buildJsonObject {
+            put("preferences", buildJsonObject {
+                put("categories", strings(categories))
+                put("subcategories", strings(subcategories))
+                put("towns", strings(towns))
+                put("comarques", strings(comarques))
+                put("radii", buildJsonObject {
+                    radii.entries.sortedBy { it.key }.forEach { (town, km) -> put(town, km) }
+                })
+                put("suggestions", suggestions)
+                put("discovery", discovery)
+                put("valencian_first", valencianFirst)
+            })
+            // Only used by the server for anonymous visitors. Authenticated accounts
+            // use server-side user_follows as the source of truth.
+            put("follows", JsonArray(follows.map { follow -> buildJsonObject {
+                put("type", follow.type); put("key", follow.key); put("label", follow.label)
+            } }))
+        })
+        require(root.bool("calculated_on_server")) { "Resposta sense càlcul compartit del servidor" }
+        return root.arr("ids").mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+            .filter { it > 0 }.distinct()
+    }
+
+    /** Account-scoped settings shared with Android; absent row means legacy local migration. */
+    suspend fun feedPreferences(): IosServerFeedPreferences {
+        val root = request("preferences/feed.php", authenticated = true)
+        return IosServerFeedPreferences.from(root)
+    }
+    suspend fun saveFeedPreferences(suggestions: Boolean, discovery: String, valencianFirst: Boolean): IosServerFeedPreferences {
+        val root = request("preferences/feed.php", buildJsonObject {
+            put("preferences", buildJsonObject {
+                put("suggestions",suggestions)
+                put("discovery",discovery)
+                put("valencian_first",valencianFirst)
+            })
+        }, authenticated = true)
+        require(root.bool("exists")) { "El servidor no ha guardat les preferències." }
+        return IosServerFeedPreferences.from(root)
+    }
+
     suspend fun restoreAccount(): IosAccount? {
         if (token.isNullOrBlank()) return null
         return runCatching {
@@ -952,3 +1002,14 @@ internal fun decodeLocationPreferences(root: JsonObject): IosServerLocationPrefe
 /** Snapshot compatible amb el GET visibility/index.php d'Android. */
 data class IosVisibilityExclusions(val artists: Set<String> = emptySet(),
     val events: Set<Int> = emptySet(), val categories: Set<String> = emptySet())
+
+/** Defaults are only used when the server has no settings for a new/legacy account. */
+data class IosServerFeedPreferences(val suggestions: Boolean, val discovery: String, val valencianFirst: Boolean, val exists: Boolean) {
+    companion object {
+        fun from(root: JsonObject): IosServerFeedPreferences {
+            val p = root["preferences"] as? JsonObject ?: error("Falten preferències de Per a tu")
+            val discovery = p.text("discovery").takeIf { it in setOf("MY_TASTES","BALANCED","EXPLORE") } ?: "BALANCED"
+            return IosServerFeedPreferences(p.bool("suggestions"), discovery, p.bool("valencian_first"), root.bool("exists"))
+        }
+    }
+}

@@ -108,6 +108,8 @@ class AgendaState(context: Context) {
     private val appContext = context.applicationContext
     private val stateStartedAt = SystemClock.elapsedRealtime()
     private val store = context.getSharedPreferences("agenda_valenciana", Context.MODE_PRIVATE)
+    // Only the previous session owner may migrate the old, app-global taste switches.
+    private val legacyFeedPrefsOwner = store.getString("session_username", null)
     // 10az: totes les tasques I/O de l’estat compartixen un pool acotat.
     // Evita crear desenes de fils nous durant scroll, likes, guardats i sincronitzacions.
     private val backgroundExecutor = Executors.newFixedThreadPool(4)
@@ -2181,10 +2183,64 @@ class AgendaState(context: Context) {
     // Canvis de Llocs fets amb l'app oberta prevalen sobre una càrrega retardada.
     @Volatile private var userPreferencesWriteRevision = 0L
     private val placesSyncExecutor = Executors.newSingleThreadExecutor()
+    private val feedPrefsSyncExecutor = Executors.newSingleThreadExecutor()
     var placesSyncError by mutableStateOf<String?>(null)
         private set
     var placesSavedOnServer by mutableStateOf(false)
         private set
+
+    /** Server is the source of truth for all signed-in feed switches. Offline edits are journaled per account. */
+    private fun synchronizeFeedPreferencesWithServer() {
+        val name = currentAccount?.username ?: return
+        val tokenAtRequest = ServerApiRepository.token(appContext)?.takeIf(String::isNotBlank) ?: return
+        val revisionAtRequest = userPreferencesWriteRevision
+        feedPrefsSyncExecutor.execute {
+            if (ServerApiRepository.token(appContext) != tokenAtRequest) return@execute
+            val dirtyKey = userCacheKey("feed_prefs_remote_dirty", name)
+            val remoteResult = ServerApiRepository.fetchFeedPreferences(tokenAtRequest)
+            if (remoteResult.isFailure) return@execute // offline: keep local journal for next login/foreground
+            val remote = remoteResult.getOrThrow()
+            if (ServerApiRepository.token(appContext) != tokenAtRequest) return@execute
+            val pending = store.getBoolean(dirtyKey,false)
+            if (pending || !remote.exists) {
+                val local = loadUserPreferences(name)
+                val result = ServerApiRepository.saveFeedPreferences(tokenAtRequest,local.showSuggestions,
+                    local.discoveryLevel.name,local.valencianFirst)
+                Handler(Looper.getMainLooper()).post {
+                    if (currentAccount?.username != name || ServerApiRepository.token(appContext) != tokenAtRequest) return@post
+                    if (result.isSuccess && revisionAtRequest == userPreferencesWriteRevision) {
+                        store.edit().putBoolean(dirtyKey,false).apply()
+                        expireForYouSnapshot(); invalidateFeedCache()
+                    } else if (result.isFailure) {
+                        store.edit().putBoolean(dirtyKey,true).apply()
+                    } else synchronizeFeedPreferencesWithServer()
+                }
+            } else {
+                Handler(Looper.getMainLooper()).post {
+                    if (currentAccount?.username != name || ServerApiRepository.token(appContext) != tokenAtRequest) return@post
+                    if (revisionAtRequest != userPreferencesWriteRevision || store.getBoolean(dirtyKey,false)) {
+                        synchronizeFeedPreferencesWithServer(); return@post
+                    }
+                    val level = runCatching { DiscoveryLevel.valueOf(remote.discovery) }.getOrDefault(DiscoveryLevel.BALANCED)
+                    if (userPreferences.showSuggestions != remote.suggestions ||
+                        userPreferences.discoveryLevel != level || userPreferences.valencianFirst != remote.valencianFirst) {
+                        userPreferencesWriteRevision += 1L
+                        userPreferences = userPreferences.copy(showSuggestions=remote.suggestions,
+                            discoveryLevel=level,valencianFirst=remote.valencianFirst)
+                        persistFeedPreferencesLocally(name)
+                        expireForYouSnapshot(); invalidateFeedCache()
+                    }
+                }
+            }
+        }
+    }
+    private fun persistFeedPreferencesLocally(name: String?) {
+        store.edit()
+            .putBoolean(userCacheKey("valencian_first",name),userPreferences.valencianFirst)
+            .putBoolean(userCacheKey("show_suggestions",name),userPreferences.showSuggestions)
+            .putString(userCacheKey("discovery_level",name),userPreferences.discoveryLevel.name)
+            .commit()
+    }
 
     /** Manté l'estat de Llocs entre dispositius, sense perdre canvis offline. */
     private fun synchronizePlacesWithServer() {
@@ -2827,6 +2883,7 @@ class AgendaState(context: Context) {
             handler.postDelayed({ refreshTicketsForCurrentUser() }, if (hasCachedAgenda) 16_000L else 1_800L)
             handler.postDelayed({ refreshUserStateFromServer() }, if (hasCachedAgenda) 23_000L else 2_200L)
             handler.postDelayed({ synchronizePlacesWithServer() }, if (hasCachedAgenda) 10_000L else 2_500L)
+            handler.postDelayed({ synchronizeFeedPreferencesWithServer() }, if (hasCachedAgenda) 11_000L else 2_600L)
         }
         if (ServerApiRepository.isConfigured()) {
             handler.postDelayed({ refreshUserProfilesFromServer() }, 21_000L)
@@ -3305,6 +3362,7 @@ class AgendaState(context: Context) {
                     refreshUserStateFromServer()
                     refreshFilterPresetsFromServer()
                     synchronizePlacesWithServer()
+                    synchronizeFeedPreferencesWithServer()
                     refreshEmailPreferences()
                     refreshAdvertisementsFromServer()
                     refreshBatecsFromServer()
@@ -3380,6 +3438,7 @@ class AgendaState(context: Context) {
                     refreshUserStateFromServer()
                     refreshFilterPresetsFromServer()
                     synchronizePlacesWithServer()
+                    synchronizeFeedPreferencesWithServer()
                     refreshEmailPreferences()
                     refreshAdvertisementsFromServer()
                     refreshBatecsFromServer()
@@ -3440,6 +3499,7 @@ class AgendaState(context: Context) {
                     refreshUserStateFromServer()
                     refreshFilterPresetsFromServer()
                     synchronizePlacesWithServer()
+                    synchronizeFeedPreferencesWithServer()
                     refreshEmailPreferences()
                     refreshAdvertisementsFromServer()
                     refreshBatecsFromServer()
@@ -6687,6 +6747,7 @@ class AgendaState(context: Context) {
         val account = currentAccount ?: return
         if (ServerApiRepository.token(appContext).isNullOrBlank()) return
         if (store.getBoolean(userCacheKey("places_remote_dirty"), false)) synchronizePlacesWithServer()
+        if (store.getBoolean(userCacheKey("feed_prefs_remote_dirty"), false)) synchronizeFeedPreferencesWithServer()
         // La sincronització remota no ha de provocar una recàrrega visual si el servidor
         // ens torna exactament els mateixos senyals que ja teníem en cache local.
         val preferenceSignatureBefore = forYouPreferenceSignature()
@@ -8694,6 +8755,49 @@ class AgendaState(context: Context) {
             return ForYouCalculation(emptyList(), emptyMap())
         }
         val signature = forYouPreferenceSignature()
+        // New canonical server selection. The existing local Android engine remains an
+        // OFFLINE fallback only; successful server results are never re-ranked locally.
+        if (ServerApiRepository.isConfigured()) {
+            val prefs = JSONObject()
+                .put("categories", JSONArray(followedCategories.toList()))
+                .put("subcategories", JSONArray(selectedPersonalizationSubcategoryCodes().toList()))
+                .put("towns", JSONArray(userPreferences.preferredLocations.toList()))
+                .put("comarques", JSONArray(userPreferences.preferredComarques.toList()))
+                .put("suggestions", userPreferences.showSuggestions)
+                .put("discovery", userPreferences.discoveryLevel.name)
+                .put("valencian_first", userPreferences.valencianFirst)
+            val radii = JSONObject()
+            userPreferences.preferredLocations.forEach { town ->
+                radii.put(town, userPreferences.radiusForLocation(town))
+            }
+            prefs.put("radii", radii)
+            val guestFollows = JSONArray()
+            followedArtists.forEach { name -> guestFollows.put(JSONObject()
+                .put("type", "ARTIST").put("key", name).put("label", name)) }
+            followedOrganizers.forEach { name -> guestFollows.put(JSONObject()
+                .put("type", "ORGANIZER").put("key", name).put("label", name)) }
+            followedVenues.forEach { name -> guestFollows.put(JSONObject()
+                .put("type", "VENUE").put("key", name).put("label", name)) }
+            followedCategories.forEach { name -> guestFollows.put(JSONObject()
+                .put("type", "CATEGORY").put("key", name).put("label", name)) }
+            val serverIds = ServerApiRepository.computeSharedForYou(appContext, prefs, guestFollows).getOrNull()
+            if (serverIds != null) {
+                val remoteSelected = serverIds.toSet()
+                val normalizedFollowed = followedArtists.map(::normalizeSearchValue).toSet()
+                val ordered = chronological.filter { event ->
+                    event.id in remoteSelected &&
+                        (isEventVisibleForUser(event) || eventArtistKeys(event).any { it in normalizedFollowed }) &&
+                        !isFreeInternalAgendaReservation(event)
+                }.sortedWith(compareBy<Concert> { parseConcertDate(it) ?: java.time.LocalDate.MAX }
+                    .thenByDescending { userPreferences.valencianFirst &&
+                        concertLanguageKeys(it).contains(canonicalLanguageKey("Valencià")) }
+                    .thenBy { it.time }.thenBy { it.id })
+                if (visibleConcertsCacheKey() == expectedCacheKey && forYouPreferenceSignature() == signature) {
+                    saveForYouSnapshot(ordered.map { it.id }, chronological, emptyMap())
+                }
+                return ForYouCalculation(ordered, emptyMap())
+            }
+        }
         val followedKeys = followedArtists.asSequence().map(::normalizeSearchValue)
             .filter(String::isNotBlank).toSet()
         val followedOrganizerKeys = followedOrganizers.asSequence()
@@ -10326,6 +10430,8 @@ class AgendaState(context: Context) {
     fun updateUserPreferences(value: UserPreferences) {
         if (userPreferences == value) return
         userPreferencesWriteRevision += 1L
+        val feedSwitchesChanged = value.valencianFirst != userPreferences.valencianFirst ||
+            value.showSuggestions != userPreferences.showSuggestions || value.discoveryLevel != userPreferences.discoveryLevel
         val placesChanged = value.preferredLocations != userPreferences.preferredLocations ||
             value.preferredComarques != userPreferences.preferredComarques ||
             value.locationRadiiKm != userPreferences.locationRadiiKm
@@ -10348,17 +10454,20 @@ class AgendaState(context: Context) {
             .putStringSet(userCacheKey("preferred_locations"), userPreferences.preferredLocations.toSet())
             .putStringSet(userCacheKey("preferred_comarques"), userPreferences.preferredComarques.toSet())
             .putStringSet("favorite_artists", userPreferences.favoriteArtists)
-            .putBoolean("valencian_first", userPreferences.valencianFirst)
-            .putBoolean("show_suggestions", userPreferences.showSuggestions)
+            .putBoolean(userCacheKey("valencian_first"), userPreferences.valencianFirst)
+            .putBoolean(userCacheKey("show_suggestions"), userPreferences.showSuggestions)
             .putString(userCacheKey("preferred_location_radii"), JSONObject().apply {
                 userPreferences.locationRadiiKm.forEach { (town, radius) ->
                     put(town, PersonalizationOptions.validRadius(radius))
                 }
             }.toString())
-            .putString("discovery_level", userPreferences.discoveryLevel.name)
+            .putString(userCacheKey("discovery_level"), userPreferences.discoveryLevel.name)
             .apply {
                 if (placesChanged && currentAccount != null) {
                     putBoolean(userCacheKey("places_remote_dirty"), true)
+                }
+                if (feedSwitchesChanged && currentAccount != null) {
+                    putBoolean(userCacheKey("feed_prefs_remote_dirty"), true)
                 }
             }
             .commit()
@@ -10375,6 +10484,7 @@ class AgendaState(context: Context) {
             placesSavedOnServer = false
             synchronizePlacesWithServer()
         }
+        if (feedSwitchesChanged) synchronizeFeedPreferencesWithServer()
     }
 
     private fun buildNotifications(): List<AgendaNotification> {
@@ -11503,8 +11613,12 @@ class AgendaState(context: Context) {
             preferredLocations = locations,
             preferredComarques = loadStringSet(userCacheKey("preferred_comarques", username)),
             favoriteArtists = loadStringSet("favorite_artists"),
-            valencianFirst = store.getBoolean("valencian_first", true),
-            showSuggestions = store.getBoolean("show_suggestions", true),
+            valencianFirst = store.getBoolean(userCacheKey("valencian_first",username),
+                if (username != null && legacyFeedPrefsOwner == username)
+                    store.getBoolean("valencian_first",true) else true),
+            showSuggestions = store.getBoolean(userCacheKey("show_suggestions",username),
+                if (username != null && legacyFeedPrefsOwner == username)
+                    store.getBoolean("show_suggestions",true) else true),
             locationRadiiKm = runCatching {
                 val json = JSONObject(store.getString(userCacheKey("preferred_location_radii", username), "{}") ?: "{}")
                 val map = linkedMapOf<String, Int>()
@@ -11518,7 +11632,9 @@ class AgendaState(context: Context) {
                 map
             }.getOrDefault(emptyMap()),
             discoveryLevel = runCatching {
-                DiscoveryLevel.valueOf(store.getString("discovery_level", "BALANCED") ?: "BALANCED")
+                DiscoveryLevel.valueOf(store.getString(userCacheKey("discovery_level",username),
+                    if (username != null && legacyFeedPrefsOwner == username)
+                        store.getString("discovery_level", "BALANCED") else "BALANCED") ?: "BALANCED")
             }.getOrDefault(DiscoveryLevel.BALANCED)
         )
     }
