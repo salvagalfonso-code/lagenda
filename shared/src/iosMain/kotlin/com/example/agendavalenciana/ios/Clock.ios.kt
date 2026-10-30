@@ -16,7 +16,12 @@ actual fun currentLocalDateIso(): String = NSDateFormatter().apply {
 actual fun currentCulturalDateIso(): String {
     val now = NSDate()
     val hour = NSDateFormatter().apply { dateFormat = "HH" }.stringFromDate(now).toIntOrNull() ?: 12
-    val day = if (hour < 5) NSDate(timeIntervalSince1970 = now.timeIntervalSince1970 - 12.0 * 3600.0) else now
+    // En Kotlin/Native, NSDate exposa l'inicialitzador amb temps des de 2001-01-01,
+    // però no el constructor amb timeIntervalSince1970.
+    // Restem 12 h només per resoldre la data local del dia cultural anterior.
+    val day = if (hour < 5) NSDate(
+        timeIntervalSinceReferenceDate = currentEpochMillis() / 1000.0 - 978307200.0 - 43200.0
+    ) else now
     return NSDateFormatter().apply { dateFormat = "yyyy-MM-dd" }.stringFromDate(day)
 }
 actual fun platformReadPublicCache(key: String): String =
