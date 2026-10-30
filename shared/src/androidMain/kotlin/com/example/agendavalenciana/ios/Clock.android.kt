@@ -2,6 +2,10 @@ package com.example.agendavalenciana.ios
 
 actual fun currentEpochMillis(): Long = System.currentTimeMillis()
 actual fun currentLocalDateIso(): String = java.time.LocalDate.now(java.time.ZoneId.of("Europe/Madrid")).toString()
+actual fun currentCulturalDateIso(): String {
+    val now = java.time.ZonedDateTime.now(java.time.ZoneId.of("Europe/Madrid"))
+    return (if (now.hour < 5) now.toLocalDate().minusDays(1) else now.toLocalDate()).toString()
+}
 
 // These KMP UI bridges are only used by iosApp. The existing Android activity keeps its native implementations.
 private val publicCache = mutableMapOf<String, String>()

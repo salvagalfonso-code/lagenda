@@ -12,7 +12,13 @@ actual fun currentEpochMillis(): Long = kotlin.time.Clock.System.now().toEpochMi
 actual fun currentLocalDateIso(): String = NSDateFormatter().apply {
     dateFormat = "yyyy-MM-dd"
 }.stringFromDate(NSDate())
-
+// El dia cultural canvia a les 05:00 de l'hora local, fins i tot amb canvi DST.
+actual fun currentCulturalDateIso(): String {
+    val now = NSDate()
+    val hour = NSDateFormatter().apply { dateFormat = "HH" }.stringFromDate(now).toIntOrNull() ?: 12
+    val day = if (hour < 5) NSDate.dateWithTimeIntervalSinceNow(-12.0 * 3600.0) else now
+    return NSDateFormatter().apply { dateFormat = "yyyy-MM-dd" }.stringFromDate(day)
+}
 actual fun platformReadPublicCache(key: String): String =
     IosNativeBridge.current?.readCache(key).orEmpty()
 actual fun platformWritePublicCache(key: String, value: String) {

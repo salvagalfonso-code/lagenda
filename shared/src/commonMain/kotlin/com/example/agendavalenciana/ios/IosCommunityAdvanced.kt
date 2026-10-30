@@ -24,7 +24,7 @@ private fun kindName(id: String) = communityKinds.firstOrNull { it.first == id }
 
 @Composable
 internal fun IosCommunityHub(groups: List<IosCommunityGroup>, api: IosAgendaApi,
-                              isAdmin: Boolean, reload: (Boolean) -> Unit, onOpen: (IosCommunityGroup) -> Unit) {
+                              isAdmin: Boolean, authenticated: Boolean, reload: (Boolean) -> Unit, onOpen: (IosCommunityGroup) -> Unit) {
     var mine by remember { mutableStateOf(false) }
     var selectedKind by remember { mutableStateOf("") }
     var blockedOpen by remember { mutableStateOf(false) }
@@ -42,9 +42,9 @@ internal fun IosCommunityHub(groups: List<IosCommunityGroup>, api: IosAgendaApi,
         Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             FilterChip(selected = !mine, onClick = { mine = false; reload(false) }, label = { Text("Tots") })
             Spacer(Modifier.width(8.dp))
-            FilterChip(selected = mine, onClick = { mine = true; reload(true) }, label = { Text("Els meus") })
+            if (authenticated) FilterChip(selected = mine, onClick = { mine = true; reload(true) }, label = { Text("Els meus") })
             Spacer(Modifier.weight(1f))
-            TextButton(onClick = { blockedOpen = true }) { Text("Bloquejats") }
+            if (authenticated) TextButton(onClick = { blockedOpen = true }) { Text("Bloquejats") }
             if (isAdmin) TextButton(onClick = { adminOpen = true }) { Text("Moderar") }
         }
         androidx.compose.foundation.lazy.LazyRow(contentPadding = PaddingValues(horizontal = 12.dp),
@@ -71,8 +71,21 @@ internal fun IosCommunityHub(groups: List<IosCommunityGroup>, api: IosAgendaApi,
             }
         }
     }
-    if (blockedOpen) IosBlockedPeopleDialog(api) { blockedOpen = false; reload(mine) }
+    if (authenticated && blockedOpen) IosBlockedPeopleDialog(api) { blockedOpen = false; reload(mine) }
     if (adminOpen) IosAdminReportsDialog(api) { adminOpen = false; reload(mine) }
+}
+
+/** Public preview has no access to membership, messages, creator identity or private details. */
+@Composable
+internal fun IosGuestCommunityPreview(group: IosCommunityGroup, onDismiss: () -> Unit, onLogin: () -> Unit) {
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(group.title) },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Tauló cultural · ${kindName(group.type)}", fontSize = 13.sp)
+            Text(if (group.access == "OPEN") "Grup obert" else "Requerix aprovació", fontSize = 13.sp)
+            Text("Per consultar missatges, participar o escriure en el tauló, inicia sessió.", fontSize = 12.sp)
+        } },
+        confirmButton = { TextButton(onClick = onLogin) { Text("Iniciar sessió per participar") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Tancar") } })
 }
 
 @Composable

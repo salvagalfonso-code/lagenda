@@ -153,7 +153,12 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     val guestFollowTransfer = remember {
         IosGuestFollowTransfer(::platformReadPublicCache, ::platformWritePublicCache)
     }
-    var user by remember { mutableStateOf(IosUserState(follows = guestFollowTransfer.guest())) }
+    fun guestUserState(): IosUserState = IosUserState(
+        follows = guestFollowTransfer.guest(),
+        saved = iosScopedSet("saved_events", null).mapNotNull(String::toIntOrNull).filter { it > 0 }.toSet(),
+        alerts = iosScopedSet("alert_events", null).mapNotNull(String::toIntOrNull).filter { it > 0 }.toSet()
+    )
+    var user by remember { mutableStateOf(guestUserState()) }
     var account by remember { mutableStateOf<IosAccount?>(null) }
     val followSyncMutex = remember { Mutex() }
     // Android's account ∪ guest migration: first journal, then post missing follows.
@@ -478,6 +483,13 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         }
     }
     LaunchedEffect(tab, account?.id) {
+        if (tab == "Comunitat" && account == null) {
+            runCatching { api.publicCommunityGroups() }
+                .onSuccess { if (account == null) groups = it }
+                .onFailure { if (account == null) status = "No s'han pogut carregar els taulons públics" }
+        }
+    }
+    LaunchedEffect(tab, account?.id) {
         if (tab == "Perfil" && account != null) {
             val expectedId = account?.id
             val currentSettings = runCatching { api.profileSettings() }.getOrNull()
@@ -561,7 +573,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     // it synthesizes recent event news and, as a fallback, grey followed-artist circles.
     val activeBatecs = remember(batecs, user.follows, available, batecRecentEventCreations,
         today, excludedArtists, account?.id, batecClockTick) {
-        if (account == null) emptyList() else IosBatecsFeed.assemble(
+        IosBatecsFeed.assemble(
             server = batecs, follows = user.follows, catalog = available,
             recentEventCreations = batecRecentEventCreations,
             nowMillis = batecClockTick, todayIso = today,
@@ -757,8 +769,15 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         platformWritePublicCache(iosScopedCacheKey("hidden_categories", account?.id), IosAccountCachePolicy.encode(categories))
     }
     fun toggleSaved(event: AgendaEventSummary) {
-        if (account == null) { loginOpen = true; return }
         val next = event.id !in user.saved
+        if (account == null) {
+            val updated = if (next) user.saved + event.id else user.saved - event.id
+            platformWritePublicCache(iosScopedCacheKey("saved_events", null),
+                IosAccountCachePolicy.encode(updated.map(Int::toString).toSet()))
+            user = user.copy(saved = updated)
+            status = if (next) "Esdeveniment guardat en este iPhone" else "Esdeveniment llevat de Guardats"
+            return
+        }
         val expectedId = account?.id ?: return
         work {
             api.saveEvent(event, next)
@@ -768,11 +787,10 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         }
     }
     fun toggleReminder(event: AgendaEventSummary, next: Boolean, reminderAt: String = "") {
-        if (account == null) { loginOpen = true; return }
-        val requestUserId = account?.id ?: return
+        // Guests use local iOS notifications (identity 0); no private API is called.
+        val requestUserId = account?.id ?: 0
         work {
             if (next) {
-                // Do not confirm until iOS has accepted the local notification request.
                 require(reminderAt.matches(Regex("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}"))) {
                     "Cal indicar data i hora (AAAA-MM-DD HH:MM)."
                 }
@@ -782,33 +800,50 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 require(platformScheduleReminder(requestUserId, event.id, event.title, reminderAt)) {
                     "iOS no ha pogut programar l'avís. Comprova la data i el permís de notificacions."
                 }
-                // A logout or account switch may happen while Apple asks for notification permission.
-                if (account?.id != requestUserId) {
+                if ((account?.id ?: 0) != requestUserId) {
                     platformCancelReminder(requestUserId, event.id)
                     return@work
                 }
-                try {
-                    api.alertEvent(event, true)
-                } catch (ex: Exception) {
-                    platformCancelReminder(requestUserId, event.id)
-                    throw ex
+                if (requestUserId > 0) {
+                    try { api.alertEvent(event, true) }
+                    catch (ex: Exception) {
+                        platformCancelReminder(requestUserId, event.id)
+                        throw ex
+                    }
                 }
-                if (account?.id == requestUserId) {
-                    platformWritePublicCache(iosReminderKey(requestUserId, event.id), reminderAt)
-                    user = user.copy(alerts = user.alerts + event.id)
-                    status = "Recordatori guardat i programat en iPhone"
+                platformWritePublicCache(iosReminderKey(requestUserId, event.id), reminderAt)
+                val nextAlerts = user.alerts + event.id
+                // Android parity: enabling an event bell also adds it to General.
+                val nextSaved = user.saved + event.id
+                if (requestUserId == 0) {
+                    platformWritePublicCache(iosScopedCacheKey("alert_events", null),
+                        IosAccountCachePolicy.encode(nextAlerts.map(Int::toString).toSet()))
+                    platformWritePublicCache(iosScopedCacheKey("saved_events", null),
+                        IosAccountCachePolicy.encode(nextSaved.map(Int::toString).toSet()))
+                } else if (event.id !in user.saved) {
+                    runCatching { api.saveEvent(event, true) }.onFailure {
+                        status = "Recordatori activat; el guardat general no s'ha pogut sincronitzar"
+                    }
+                }
+                if ((account?.id ?: 0) == requestUserId) {
+                    user = user.copy(alerts = nextAlerts, saved = nextSaved)
+                    if (status.isBlank()) status = "Recordatori programat en iPhone"
                 }
             } else {
-                api.alertEvent(event, false)
+                if (requestUserId > 0) api.alertEvent(event, false)
                 platformCancelReminder(requestUserId, event.id)
-                if (account?.id == requestUserId) {
+                if ((account?.id ?: 0) == requestUserId) {
                     platformWritePublicCache(iosReminderKey(requestUserId, event.id), "")
-                    user = user.copy(alerts = user.alerts - event.id)
+                    val nextAlerts = user.alerts - event.id
+                    if (requestUserId == 0) platformWritePublicCache(iosScopedCacheKey("alert_events", null),
+                        IosAccountCachePolicy.encode(nextAlerts.map(Int::toString).toSet()))
+                    user = user.copy(alerts = nextAlerts)
                     status = "Recordatori desactivat"
                 }
             }
         }
     }
+
     fun toggleFollowEntity(type: String, value: String) {
         val clean = value.trim()
         if (clean.isBlank() || type !in setOf("ARTIST", "ORGANIZER", "VENUE", "CATEGORY")) return
@@ -971,7 +1006,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                             // Contractual HEADER creative before batecs, as Android. No duplicate in LazyColumn.
                             SponsoredCarousel("Capçalera", paid.ads.filter { it.placement == "HEADER" },
                                 eventById, ::adViewed, ::adOpened, header = true)
-                            if (account != null && followedGroups.size >= 6) {
+                            if (followedGroups.size >= 6) {
                                 LazyRow(
                                     state = batecRowState,
                                     modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
@@ -1155,38 +1190,41 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                         }
                     }
                     "Guardats" -> {
-                        if (account == null) {
-                            Column(Modifier.fillMaxSize()) {
-                                PageTitle("Les meues agendes")
-                                LoginPrompt { loginOpen = true }
-                            }
-                        } else {
-                            val expectedAccountId = account?.id ?: 0
-                            key(expectedAccountId) {
-                                IosSavedAgendaScreen(
-                                    accountId = expectedAccountId,
-                                    user = user,
-                                    lists = savedLists,
-                                    available = available,
-                                    today = today,
-                                    api = api,
-                                    work = ::work,
-                                    onListsChanged = { result -> if (account?.id == expectedAccountId) savedLists = result },
-                                    onStatus = { status = it },
-                                    onOpenEvent = { event, matchedArtist -> showEvent(event, matchedArtist, matchedArtist.isNotBlank()) },
-                                    onToggleSaved = ::toggleSaved,
-                                    onDisableReminder = { alertToDisable = it },
-                                    reminderTime = { event -> platformReadPublicCache(iosReminderKey(expectedAccountId,event.id)) },
-                                    festivalRevision = savedFestivalRevision
-                                )
-                            }
+                        val visibleAccountId = account?.id ?: 0
+                        key(visibleAccountId) {
+                            IosSavedAgendaScreen(
+                                accountId = visibleAccountId,
+                                authenticated = account != null,
+                                onLoginRequired = { loginOpen = true },
+                                user = user,
+                                lists = if (account == null) emptyList() else savedLists,
+                                available = available,
+                                today = today,
+                                api = api,
+                                work = ::work,
+                                onListsChanged = { result -> if (account?.id == visibleAccountId && visibleAccountId > 0) savedLists = result },
+                                onStatus = { status = it },
+                                onOpenEvent = { event, matchedArtist -> showEvent(event, matchedArtist, matchedArtist.isNotBlank()) },
+                                onToggleSaved = ::toggleSaved,
+                                onDisableReminder = { alertToDisable = it },
+                                reminderTime = { event -> platformReadPublicCache(iosReminderKey(visibleAccountId,event.id)) },
+                                festivalRevision = savedFestivalRevision
+                            )
                         }
                     }
                     "Entrades" -> {
                         Column(Modifier.fillMaxSize()) {
                             PageTitle("Les meues entrades")
-                            if (account == null) LoginPrompt { loginOpen = true }
-                            else {
+                            if (account == null) {
+                                Text("Pots consultar les entrades disponibles des de la fitxa de qualsevol esdeveniment. Per recuperar les entrades comprades o emeses al teu nom, inicia sessió.",
+                                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp), fontSize = 14.sp)
+                                TextButton(onClick = { tab = "Inici" }, modifier = Modifier.padding(horizontal = 12.dp)) {
+                                    Text("Buscar esdeveniments")
+                                }
+                                TextButton(onClick = { loginOpen = true }, modifier = Modifier.padding(horizontal = 12.dp)) {
+                                    Text("Iniciar sessió per recuperar entrades")
+                                }
+                            } else {
                                 TextButton(onClick = { work { tickets = api.tickets() } }, modifier = Modifier.padding(horizontal = 12.dp)) { Text("↻ Actualitzar entrades") }
                                 if (tickets.isEmpty()) EmptyState("No hi ha entrades vinculades al teu compte.")
                                 else LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1210,9 +1248,12 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                         }
                     }
                     "Comunitat" -> {
-                        if (account == null) LoginPrompt { loginOpen = true }
-                        else IosCommunityHub(groups, api, isAdmin = IosCommunityPolicy.canSeeAdminQueue(account?.role.orEmpty()),
-                            reload = { mine -> work { groups = api.community(mine=mine) } },
+                        IosCommunityHub(groups, api,
+                            isAdmin = account != null && IosCommunityPolicy.canSeeAdminQueue(account?.role.orEmpty()),
+                            authenticated = account != null,
+                            reload = { mine -> work {
+                                groups = if (account == null) api.publicCommunityGroups() else api.community(mine = mine)
+                            } },
                             onOpen = { communityGroup = it })
                     }
                     "Perfil" -> {
@@ -1302,7 +1343,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                     account?.id?.let { sessionBridge?.cancelAllLocalReminders(it) }
                                     try { api.signOutSecurely() } catch (_: Exception) { api.signOut() }
                                     account = null; myProfile = null; profileSettings = null
-                                    user = IosUserState(follows = guestFollowTransfer.guest()); artistBells = emptyMap(); tickets = emptyList()
+                                    user = guestUserState(); artistBells = emptyMap(); tickets = emptyList()
                                     notices = emptyList(); groups = emptyList(); seenBatecs = emptySet()
                                     batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList()
                                     activeFilterPresetName = null; selectedFeedCategory = null
@@ -1750,15 +1791,19 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             loadSchedule = api::festivalSchedule,
             onArtist = { artistSourceEvent = ev; selected = null; artist = it }, onCommunity = {
                 selected = null
-                if (account == null) loginOpen = true
-                else work { groups = api.community(ev.id); tab = "Comunitat" }
+                val requestedId = account?.id
+                tab = "Comunitat"
+                work {
+                    val loaded = if (requestedId == null) api.publicCommunityGroups(ev.id) else api.community(ev.id)
+                    if (account?.id == requestedId) groups = loaded
+                }
             }, onCreateGroup = {
                 if (account == null) loginOpen = true else { selected = null; groupCreateFor = ev }
             }, onTickets = {
                 if (ev.ticketUrl.startsWith("https://")) platformOpenExternal(ev.ticketUrl)
                 else if (ev.ticketAvailable) {
                     selected = null
-                    if (account == null) loginOpen = true else ticketEvent = ev
+                    ticketEvent = ev // Viewing ticket options is public; reservation requires auth.
                 } else status = "Este esdeveniment no té venda d'entrades disponible."
             }) }
         artist?.let { value ->
@@ -1854,7 +1899,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                     if (account?.id == expectedId) {
                         // Revokes local reminders for the previous identity and clears account-scoped UI.
                         user.alerts.forEach { eventId -> sessionBridge?.cancelLocalReminder(expectedId ?: 0, eventId) }
-                        account = null; myProfile = null; user = IosUserState(); artistBells = emptyMap()
+                        account = null; myProfile = null; user = guestUserState(); artistBells = emptyMap()
                         tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap()
                         savedLists = emptyList(); searchPresets = emptyList()
                         sessionBridge?.eraseLocalAccountData(expectedId ?: 0)
@@ -1866,6 +1911,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         }
         if (validatorOpen) ProfessionalValidationDialog(api, onDismiss = { validatorOpen = false })
         ticketEvent?.let { event -> TicketOptionsDialog(event, api,
+            authenticated = account != null,
+            onLoginRequired = { ticketEvent = null; loginOpen = true },
             onDismiss = { ticketEvent = null }, onPurchased = {
                 ticketEvent = null; status = "Entrades gratuïtes emeses correctament"; tab = "Entrades"
                 work { tickets = api.tickets() }
@@ -1873,8 +1920,12 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         groupCreateFor?.let { event -> CreateGroupDialog(event, api, onDismiss = { groupCreateFor = null },
             onCreated = { groupCreateFor = null; status = "Tauló creat"; work { groups = api.community(event.id) } },
             onError = { error = it }) }
-        communityGroup?.let { g -> IosCommunityChatDialog(g, api, account?.id ?: 0,
-            onDismiss = { communityGroup = null }, onChanged = { work { groups = api.community() } }) }
+        communityGroup?.let { g ->
+            if (account == null) IosGuestCommunityPreview(g,
+                onDismiss = { communityGroup = null }, onLogin = { communityGroup = null; loginOpen = true })
+            else IosCommunityChatDialog(g, api, account?.id ?: 0,
+                onDismiss = { communityGroup = null }, onChanged = { work { groups = api.community() } })
+        }
         reminderToSchedule?.let { ev -> ReminderEditorDialog(ev, account?.id ?: 0,
             onDismiss = { reminderToSchedule = null }, onSave = { requestedAt ->
             reminderToSchedule = null
@@ -2358,10 +2409,10 @@ private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: B
         }
         detailLoading = false
     }
-    var visibleToday by remember(ev.id) { mutableStateOf(currentLocalDateIso()) }
+    var visibleToday by remember(ev.id) { mutableStateOf(currentCulturalDateIso()) }
     LaunchedEffect(ev.id) {
         while (true) {
-            visibleToday = currentLocalDateIso()
+            visibleToday = currentCulturalDateIso()
             kotlinx.coroutines.delay(60_000L)
         }
     }
@@ -3477,7 +3528,8 @@ private fun ChatDialog(group: IosCommunityGroup, api: IosAgendaApi, isCreator: B
 }
 
 @Composable
-private fun TicketOptionsDialog(event: AgendaEventSummary, api: IosAgendaApi, onDismiss: () -> Unit,
+private fun TicketOptionsDialog(event: AgendaEventSummary, api: IosAgendaApi,
+                                authenticated: Boolean, onLoginRequired: () -> Unit, onDismiss: () -> Unit,
                                 onPurchased: () -> Unit, onError: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     var options by remember(event.id) { mutableStateOf(emptyList<IosTicketOption>()) }
@@ -3519,13 +3571,14 @@ private fun TicketOptionsDialog(event: AgendaEventSummary, api: IosAgendaApi, on
             TextButton(enabled = loaded && !busy && serverError.isBlank() && (options.isEmpty() || selectedOption != null) && price == 0.0 &&
                 (selectedOption?.remaining == null || selectedOption!!.remaining!! >= quantity),
                 onClick = {
+                    if (!authenticated) { onLoginRequired(); return@TextButton }
                     busy = true
                     scope.launch {
                         try { api.reserveFreeTicket(event.id, selectedOption?.id ?: 0, quantity); onPurchased() }
                         catch (ex: Exception) { onError(ex.message ?: "No s'ha pogut emetre l'entrada") }
                         finally { busy = false }
                     }
-                }) { Text(if (busy) "Emetent…" else "Reservar gratuïtament") }
+                }) { Text(if (!authenticated) "Iniciar sessió per reservar" else if (busy) "Emetent…" else "Reservar gratuïtament") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Tancar") } })
 }

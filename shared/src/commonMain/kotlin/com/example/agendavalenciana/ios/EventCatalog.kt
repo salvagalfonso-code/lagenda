@@ -162,6 +162,8 @@ internal fun validMediaUrl(raw: String): String = when {
 
 expect fun currentEpochMillis(): Long
 expect fun currentLocalDateIso(): String
+/** Dia de programació: la jornada acaba a les 05:00, no a mitjanit. */
+expect fun currentCulturalDateIso(): String
 /** Non-sensitive on-device UI/cache data only. Tokens NEVER go here. */
 expect fun platformReadPublicCache(key: String): String
 expect fun platformWritePublicCache(key: String, value: String)

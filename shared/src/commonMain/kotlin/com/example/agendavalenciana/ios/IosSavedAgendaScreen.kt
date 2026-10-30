@@ -28,6 +28,8 @@ import coil3.compose.AsyncImage
 @Composable
 internal fun IosSavedAgendaScreen(
     accountId: Int,
+    authenticated: Boolean,
+    onLoginRequired: () -> Unit,
     user: IosUserState,
     lists: List<IosSavedList>,
     available: List<AgendaEventSummary>,
@@ -71,7 +73,7 @@ internal fun IosSavedAgendaScreen(
     // Only the General view aggregates them; a shared list contains events, not private slots.
     val slots = remember(accountId, available, today, festivalRevision, localSlotRevision) {
         available.filter { it.isFestival }.distinctBy { it.id }.flatMap { festival ->
-            val key = IosAccountCachePolicy.key("festival_schedule_${festival.id}", accountId)
+            val key = IosAccountCachePolicy.key("festival_schedule_${festival.id}", accountId.takeIf { authenticated })
             val saved = IosFestivalSavedSlotPolicy.decode(platformReadPublicCache(key))
             IosSavedAgendaPolicy.activeSlots(saved, festival.id, today).map { festival to it }
         }
@@ -85,6 +87,7 @@ internal fun IosSavedAgendaScreen(
             .thenBy { it.time }.thenBy { it.sortId })
     }
     fun reloadLists(message: String) {
+        if (!authenticated) { onLoginRequired(); return }
         work { onListsChanged(api.savedLists()); onStatus(message) }
     }
 
@@ -124,7 +127,9 @@ internal fun IosSavedAgendaScreen(
                     }
                 }
                 Box(Modifier.height(53.dp).clip(RoundedCornerShape(12.dp))
-                    .background(AgendaBlack).clickable { newListDialog = true }
+                    .background(AgendaBlack).clickable {
+                        if (authenticated) newListDialog = true else onLoginRequired()
+                    }
                     .padding(horizontal = 12.dp), contentAlignment = Alignment.Center) {
                     Text("+ Nova llista", maxLines = 1, color = Color.White,
                         fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
@@ -133,7 +138,7 @@ internal fun IosSavedAgendaScreen(
             if (selectedList != null) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 15.dp),
                     horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (selectedList.owner) {
+                    if (selectedList.owner && authenticated) {
                         TextButton(onClick = {
                             if (selectedList.shareCode.isNotBlank() && selectedList.inviteUrl.isNotBlank()) {
                                 shareData = IosSavedListShare(selectedList.inviteUrl, selectedList.shareCode)
@@ -284,7 +289,7 @@ internal fun IosSavedAgendaScreen(
         AlertDialog(onDismissRequest = { slotToRemove = null }, title = { Text("Llevar actuació guardada?") },
             text = { Text(slot.title.ifBlank { slot.artist }) },
             confirmButton = { TextButton(onClick = {
-                val cacheKey = IosAccountCachePolicy.key("festival_schedule_${event.id}", accountId)
+                val cacheKey = IosAccountCachePolicy.key("festival_schedule_${event.id}", accountId.takeIf { authenticated })
                 val current = IosFestivalSavedSlotPolicy.decode(platformReadPublicCache(cacheKey))
                 platformWritePublicCache(cacheKey, IosFestivalSavedSlotPolicy.encode(current - slot.originalKey))
                 slotToRemove = null

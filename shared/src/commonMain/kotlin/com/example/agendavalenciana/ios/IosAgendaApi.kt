@@ -617,6 +617,11 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
         require(groupId>0 && reason.isNotBlank())
         request("community/report.php",buildJsonObject {put("group_id",groupId);put("reason",reason.trim().take(500))},authenticated=true)
     }
+    /** Read-only public listing. Never sends an account token requirement for guests. */
+    suspend fun publicCommunityGroups(eventId: Int? = null): List<IosCommunityGroup> {
+        val path = "community/public-groups-ios.php" + (eventId?.let { "?event_id=$it" } ?: "")
+        return request(path).items("groups").map(::decodeCommunityGroup)
+    }
     suspend fun community(eventId: Int? = null, mine: Boolean = false): List<IosCommunityGroup> {
         val args = listOfNotNull(eventId?.let { "event_id=$it" }, if (mine) "mine=1" else null)
         val path = "community/groups.php" + if (args.isEmpty()) "" else "?"+args.joinToString("&")
