@@ -16,7 +16,7 @@ actual fun currentLocalDateIso(): String = NSDateFormatter().apply {
 actual fun currentCulturalDateIso(): String {
     val now = NSDate()
     val hour = NSDateFormatter().apply { dateFormat = "HH" }.stringFromDate(now).toIntOrNull() ?: 12
-    val day = if (hour < 5) NSDate.dateWithTimeIntervalSinceNow(-12.0 * 3600.0) else now
+    val day = if (hour < 5) NSDate(timeIntervalSince1970 = now.timeIntervalSince1970 - 12.0 * 3600.0) else now
     return NSDateFormatter().apply { dateFormat = "yyyy-MM-dd" }.stringFromDate(day)
 }
 actual fun platformReadPublicCache(key: String): String =
