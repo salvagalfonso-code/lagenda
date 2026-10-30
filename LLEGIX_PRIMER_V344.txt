@@ -1,0 +1,5 @@
+L’AGENDA v344 · Ajustos de paritat visual d’iPhone amb Android.
+
+Obri ANDROID_STUDIO/COMPROVACIONS/PARITAT_VISUAL_ANDROID_IOS_V344.md abans de compilar.
+Projecte per a Codemagic/Xcode: ANDROID_STUDIO/iosApp/AgendaIOS.xcodeproj.
+No és una compilació signada ni una app instal·lable: cal compilar-la, comprovar les captures i validar els clics.

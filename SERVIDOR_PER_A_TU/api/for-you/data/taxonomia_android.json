@@ -1,0 +1,635 @@
+{
+  "categories": [
+    {
+      "code": "MUSIC",
+      "label": "Música"
+    },
+    {
+      "code": "THEATRE",
+      "label": "Teatre"
+    },
+    {
+      "code": "CINEMA",
+      "label": "Cinema"
+    },
+    {
+      "code": "TALKS",
+      "label": "Xarrades"
+    },
+    {
+      "code": "DANCE",
+      "label": "Dansa"
+    },
+    {
+      "code": "EXHIBITIONS",
+      "label": "Exposicions"
+    },
+    {
+      "code": "LITERATURE",
+      "label": "Literatura"
+    },
+    {
+      "code": "WORKSHOPS",
+      "label": "Tallers"
+    },
+    {
+      "code": "POPULAR_CULTURE",
+      "label": "Cultura popular"
+    },
+    {
+      "code": "HERITAGE",
+      "label": "Patrimoni"
+    },
+    {
+      "code": "OTHER",
+      "label": "Altres"
+    },
+    {
+      "code": "CHILDREN",
+      "label": "Infantil"
+    }
+  ],
+  "subcategories": [
+    {
+      "parent": "MUSIC",
+      "code": "MUSIC__ROCK_SKA_PUNK_METAL",
+      "label": "Rock, Ska, punk i metal",
+      "aliases": [
+        "rock",
+        "ska",
+        "punk",
+        "hardcore",
+        "metal",
+        "rock alternatiu"
+      ]
+    },
+    {
+      "parent": "MUSIC",
+      "code": "MUSIC__POP_INDIE_URBANA",
+      "label": "Pop, indie i música urbana",
+      "aliases": [
+        "pop",
+        "indie",
+        "hip-hop",
+        "rap",
+        "trap",
+        "reggaeton",
+        "electrònica"
+      ]
+    },
+    {
+      "parent": "MUSIC",
+      "code": "MUSIC__FOLK_TRADICIONAL_MON",
+      "label": "Folk, tradicional i músiques del món",
+      "aliases": [
+        "folk",
+        "arrel",
+        "música tradicional",
+        "valencià",
+        "balcànica",
+        "músiques del món"
+      ]
+    },
+    {
+      "parent": "MUSIC",
+      "code": "MUSIC__JAZZ_BLUES_SOUL",
+      "label": "Jazz, blues i soul",
+      "aliases": [
+        "jazz",
+        "blues",
+        "soul",
+        "funk",
+        "swing",
+        "rhythm & blues"
+      ]
+    },
+    {
+      "parent": "MUSIC",
+      "code": "MUSIC__CLASSICA_OPERA_BANDA",
+      "label": "Clàssica, òpera i música de banda",
+      "aliases": [
+        "clàssica",
+        "simfònica",
+        "cambra",
+        "òpera",
+        "lírica",
+        "banda",
+        "coral"
+      ]
+    },
+    {
+      "parent": "THEATRE",
+      "code": "THEATRE__COMEDIA_HUMOR",
+      "label": "Comèdia i humor",
+      "aliases": [
+        "comèdia",
+        "humor",
+        "monòlegs",
+        "stand-up"
+      ]
+    },
+    {
+      "parent": "THEATRE",
+      "code": "THEATRE__DRAMA",
+      "label": "Drama",
+      "aliases": [
+        "drama",
+        "tragèdia",
+        "teatre dramàtic"
+      ]
+    },
+    {
+      "parent": "THEATRE",
+      "code": "THEATRE__MUSICAL",
+      "label": "Musical",
+      "aliases": [
+        "teatre musical",
+        "musical"
+      ]
+    },
+    {
+      "parent": "THEATRE",
+      "code": "THEATRE__CONTEMPORANI_EXPERIMENTAL",
+      "label": "Teatre contemporani i experimental",
+      "aliases": [
+        "teatre contemporani",
+        "experimental",
+        "performance teatral"
+      ]
+    },
+    {
+      "parent": "THEATRE",
+      "code": "THEATRE__TITELLES_GESTUAL",
+      "label": "Titelles i teatre gestual",
+      "aliases": [
+        "titelles",
+        "marionetes",
+        "teatre gestual",
+        "objectes",
+        "ombres"
+      ]
+    },
+    {
+      "parent": "CINEMA",
+      "code": "CINEMA__FICCIO",
+      "label": "Ficció",
+      "aliases": [
+        "llargmetratge",
+        "ficció",
+        "narrativa cinematogràfica"
+      ]
+    },
+    {
+      "parent": "CINEMA",
+      "code": "CINEMA__DOCUMENTAL",
+      "label": "Documental",
+      "aliases": [
+        "documental",
+        "cinema documental",
+        "no ficció"
+      ]
+    },
+    {
+      "parent": "CINEMA",
+      "code": "CINEMA__AUTOR_INDEPENDENT",
+      "label": "Cinema d'autor i independent",
+      "aliases": [
+        "cinema d'autor",
+        "cinema independent",
+        "cineclub"
+      ]
+    },
+    {
+      "parent": "CINEMA",
+      "code": "CINEMA__ANIMACIO",
+      "label": "Animació",
+      "aliases": [
+        "animació",
+        "stop-motion"
+      ]
+    },
+    {
+      "parent": "CINEMA",
+      "code": "CINEMA__CURTMETRATGES",
+      "label": "Curtmetratges",
+      "aliases": [
+        "curts",
+        "curtmetratges"
+      ]
+    },
+    {
+      "parent": "TALKS",
+      "code": "TALKS__HISTORIA_PATRIMONI",
+      "label": "Història i patrimoni",
+      "aliases": [
+        "història",
+        "patrimoni",
+        "arqueologia",
+        "memòria històrica"
+      ]
+    },
+    {
+      "parent": "TALKS",
+      "code": "TALKS__CIENCIA_TECNOLOGIA",
+      "label": "Ciència i tecnologia",
+      "aliases": [
+        "ciència",
+        "divulgació",
+        "tecnologia",
+        "astronomia"
+      ]
+    },
+    {
+      "parent": "TALKS",
+      "code": "TALKS__SOCIETAT_POLITICA",
+      "label": "Societat i política",
+      "aliases": [
+        "política",
+        "societat",
+        "drets humans",
+        "igualtat",
+        "debat"
+      ]
+    },
+    {
+      "parent": "TALKS",
+      "code": "TALKS__ART_CULTURA",
+      "label": "Art i cultura",
+      "aliases": [
+        "arts",
+        "cultura",
+        "música",
+        "cinema",
+        "literatura"
+      ]
+    },
+    {
+      "parent": "TALKS",
+      "code": "TALKS__FILOSOFIA_PENSAMENT",
+      "label": "Filosofia i pensament",
+      "aliases": [
+        "filosofia",
+        "pensament",
+        "ètica"
+      ]
+    },
+    {
+      "parent": "DANCE",
+      "code": "DANCE__BALLET_CLASSIC",
+      "label": "Ballet clàssic",
+      "aliases": [
+        "ballet",
+        "dansa clàssica"
+      ]
+    },
+    {
+      "parent": "DANCE",
+      "code": "DANCE__CONTEMPORANIA",
+      "label": "Dansa contemporània",
+      "aliases": [
+        "dansa contemporània",
+        "dansa-teatre"
+      ]
+    },
+    {
+      "parent": "DANCE",
+      "code": "DANCE__TRADICIONAL",
+      "label": "Dansa tradicional",
+      "aliases": [
+        "danses populars",
+        "dansà",
+        "ball tradicional"
+      ]
+    },
+    {
+      "parent": "DANCE",
+      "code": "DANCE__URBANA",
+      "label": "Dansa urbana",
+      "aliases": [
+        "hip-hop",
+        "breaking",
+        "street dance"
+      ]
+    },
+    {
+      "parent": "DANCE",
+      "code": "DANCE__FLAMENC_SALO",
+      "label": "Flamenc i balls de saló",
+      "aliases": [
+        "flamenc",
+        "flamenco",
+        "tango",
+        "balls de saló"
+      ]
+    },
+    {
+      "parent": "EXHIBITIONS",
+      "code": "EXHIBITIONS__PINTURA_ESCULTURA",
+      "label": "Pintura i escultura",
+      "aliases": [
+        "pintura",
+        "escultura",
+        "dibuix"
+      ]
+    },
+    {
+      "parent": "EXHIBITIONS",
+      "code": "EXHIBITIONS__FOTOGRAFIA",
+      "label": "Fotografia",
+      "aliases": [
+        "fotografia",
+        "fotoperiodisme",
+        "fotogràfic"
+      ]
+    },
+    {
+      "parent": "EXHIBITIONS",
+      "code": "EXHIBITIONS__ART_CONTEMPORANI",
+      "label": "Art contemporani",
+      "aliases": [
+        "art contemporani",
+        "instal·lació",
+        "arts visuals"
+      ]
+    },
+    {
+      "parent": "EXHIBITIONS",
+      "code": "EXHIBITIONS__HISTORIA_PATRIMONI",
+      "label": "Història i patrimoni",
+      "aliases": [
+        "història",
+        "memòria històrica",
+        "patrimoni",
+        "etnologia"
+      ]
+    },
+    {
+      "parent": "EXHIBITIONS",
+      "code": "EXHIBITIONS__CIENCIA_TECNOLOGIA",
+      "label": "Ciència i tecnologia",
+      "aliases": [
+        "ciència",
+        "tecnologia",
+        "exposició científica"
+      ]
+    },
+    {
+      "parent": "LITERATURE",
+      "code": "LITERATURE__NOVELLA_NARRATIVA",
+      "label": "Novel·la i narrativa",
+      "aliases": [
+        "novel·la",
+        "narrativa",
+        "relat"
+      ]
+    },
+    {
+      "parent": "LITERATURE",
+      "code": "LITERATURE__POESIA",
+      "label": "Poesia",
+      "aliases": [
+        "poesia",
+        "recitals poètics"
+      ]
+    },
+    {
+      "parent": "LITERATURE",
+      "code": "LITERATURE__COMIC_ILLUSTRACIO",
+      "label": "Còmic i il·lustració",
+      "aliases": [
+        "còmic",
+        "manga",
+        "novel·la gràfica",
+        "il·lustració"
+      ]
+    },
+    {
+      "parent": "LITERATURE",
+      "code": "LITERATURE__PRESENTACIONS_LLIBRES",
+      "label": "Presentacions de llibres",
+      "aliases": [
+        "presentació de llibre",
+        "autores",
+        "autors"
+      ]
+    },
+    {
+      "parent": "LITERATURE",
+      "code": "LITERATURE__CLUBS_TROBADES",
+      "label": "Clubs de lectura i trobades",
+      "aliases": [
+        "club de lectura",
+        "tertúlia literària",
+        "trobades"
+      ]
+    },
+    {
+      "parent": "WORKSHOPS",
+      "code": "WORKSHOPS__ARTS_ARTESANIA",
+      "label": "Arts plàstiques i artesania",
+      "aliases": [
+        "pintura",
+        "ceràmica",
+        "manualitats",
+        "artesania"
+      ]
+    },
+    {
+      "parent": "WORKSHOPS",
+      "code": "WORKSHOPS__MUSICA_DANSA",
+      "label": "Música i dansa",
+      "aliases": [
+        "música",
+        "instrument",
+        "cant",
+        "dansa",
+        "ball"
+      ]
+    },
+    {
+      "parent": "WORKSHOPS",
+      "code": "WORKSHOPS__TEATRE_EXPRESSIO",
+      "label": "Teatre i expressió corporal",
+      "aliases": [
+        "teatre",
+        "interpretació",
+        "moviment",
+        "expressió corporal"
+      ]
+    },
+    {
+      "parent": "WORKSHOPS",
+      "code": "WORKSHOPS__LITERATURA_AUDIOVISUAL",
+      "label": "Literatura i audiovisual",
+      "aliases": [
+        "escriptura",
+        "fotografia",
+        "vídeo",
+        "audiovisual"
+      ]
+    },
+    {
+      "parent": "WORKSHOPS",
+      "code": "WORKSHOPS__CIENCIA_TECNOLOGIA",
+      "label": "Ciència i tecnologia",
+      "aliases": [
+        "tecnologia",
+        "ciència",
+        "robòtica"
+      ]
+    },
+    {
+      "parent": "POPULAR_CULTURE",
+      "code": "POPULAR_CULTURE__FESTES_POPULARS",
+      "label": "Festes populars i patronals",
+      "aliases": [
+        "festes populars",
+        "festes patronals",
+        "festa major"
+      ]
+    },
+    {
+      "parent": "POPULAR_CULTURE",
+      "code": "POPULAR_CULTURE__FALLES_MOROS_CRISTIANS",
+      "label": "Falles, Moros i Cristians",
+      "aliases": [
+        "falles",
+        "moros i cristians",
+        "entrada mora",
+        "entrada cristiana"
+      ]
+    },
+    {
+      "parent": "POPULAR_CULTURE",
+      "code": "POPULAR_CULTURE__DANSES_MUSICA_TRADICIONAL",
+      "label": "Danses i música tradicional",
+      "aliases": [
+        "danses tradicionals",
+        "música tradicional",
+        "cant d'estil"
+      ]
+    },
+    {
+      "parent": "POPULAR_CULTURE",
+      "code": "POPULAR_CULTURE__MUIXERANGUES_TRADICIONS",
+      "label": "Muixerangues i altres tradicions",
+      "aliases": [
+        "muixeranga",
+        "gegants",
+        "cabuts",
+        "correfocs",
+        "romeries"
+      ]
+    },
+    {
+      "parent": "POPULAR_CULTURE",
+      "code": "POPULAR_CULTURE__FIRES_MERCATS_TRADICIONALS",
+      "label": "Fires i mercats tradicionals",
+      "aliases": [
+        "fires tradicionals",
+        "mercat tradicional",
+        "artesania"
+      ]
+    },
+    {
+      "parent": "HERITAGE",
+      "code": "HERITAGE__HISTORIA_ARQUEOLOGIA",
+      "label": "Història i arqueologia",
+      "aliases": [
+        "història",
+        "arqueologia",
+        "jaciments"
+      ]
+    },
+    {
+      "parent": "HERITAGE",
+      "code": "HERITAGE__ARQUITECTURA_MONUMENTS",
+      "label": "Arquitectura i monuments",
+      "aliases": [
+        "arquitectura",
+        "monuments",
+        "edificis històrics"
+      ]
+    },
+    {
+      "parent": "HERITAGE",
+      "code": "HERITAGE__MUSEUS",
+      "label": "Museus",
+      "aliases": [
+        "museu",
+        "col·lecció museística"
+      ]
+    },
+    {
+      "parent": "HERITAGE",
+      "code": "HERITAGE__MEMORIA_HISTORICA",
+      "label": "Memòria històrica",
+      "aliases": [
+        "memòria històrica",
+        "memòria democràtica"
+      ]
+    },
+    {
+      "parent": "HERITAGE",
+      "code": "HERITAGE__PATRIMONI_ETNOLOGIC",
+      "label": "Patrimoni etnològic",
+      "aliases": [
+        "etnologia",
+        "costums",
+        "oficis",
+        "patrimoni immaterial"
+      ]
+    },
+    {
+      "parent": "OTHER",
+      "code": "OTHER__CIRC_ACROBACIES",
+      "label": "Circ i acrobàcies",
+      "aliases": [
+        "circ",
+        "acrobàcies",
+        "trapezi",
+        "malabars"
+      ]
+    },
+    {
+      "parent": "OTHER",
+      "code": "OTHER__MAGIA",
+      "label": "Màgia",
+      "aliases": [
+        "màgia",
+        "il·lusionisme"
+      ]
+    },
+    {
+      "parent": "OTHER",
+      "code": "OTHER__ARTS_VIVES_PERFORMANCE",
+      "label": "Arts vives i performance",
+      "aliases": [
+        "arts vives",
+        "performance",
+        "experimentació"
+      ]
+    },
+    {
+      "parent": "OTHER",
+      "code": "OTHER__GASTRONOMIA",
+      "label": "Gastronomia",
+      "aliases": [
+        "gastronomia",
+        "tastos",
+        "cuina",
+        "cultura gastronòmica"
+      ]
+    },
+    {
+      "parent": "OTHER",
+      "code": "OTHER__ACTIVITATS_MULTIDISCIPLINARIES",
+      "label": "Activitats multidisciplinàries",
+      "aliases": [
+        "multidisciplinari",
+        "diferents disciplines",
+        "festival multidisciplinari"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+L'AGENDA iOS v350 — IMPORTAR A L'ARREL DEL REPOSITORI
+========================================================
+El ZIP anterior tenia ANDROID_STUDIO/ dins del paquet. Codemagic estava
+compilant /Users/builder/clone/shared/, no /Users/builder/clone/ANDROID_STUDIO/shared/.
+
+Aquest ZIP posa els fitxers del projecte a L'ARREL:
+  shared/src/.../AgendaIosScreen.kt
+  iosApp/AgendaIOS.xcodeproj
+  gradlew
+  codemagic.yaml
+
+PER A CORREGIR EL PROBLEMA:
+1. Descomprimeix aquest ZIP en una carpeta local.
+2. Copia / puja EL CONTINGUT, no la carpeta que el conté, a l'arrel del repositori
+   GitHub que utilitza Codemagic. Sobre-escriu els fitxers homònims antics.
+3. En GitHub comprova que el fitxer shared/src/commonMain/kotlin/
+   com/example/agendavalenciana/ios/AgendaIosScreen.kt té:
+     var personalizationImagesRevision ... (abans de l'ús)
+     var feedPrefsServerRevision ... (abans de l'ús)
+4. Crea un commit i comprova que Codemagic compila eixe commit.
+5. Si fas servir el script personalitzat de Codemagic (en lloc del YAML),
+   continua funcionant, però és recomanable afegir la precomprovació del YAML.
+
+No pujar només el ZIP com un únic fitxer a GitHub: cal extraure'n el codi.
+La verificació d'integritat de ZIP no equival a una compilació iOS reeixida.

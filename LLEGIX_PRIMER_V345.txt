@@ -1,0 +1,18 @@
+L’AGENDA v345 — Paritat visual v344 + recuperació de correccions de compilació
+
+Base: v344. Conserva les modificacions visuals de la v344, sense alterar l'Android original.
+Correccions recuperades del flux anterior de compilació Codemagic (28/10/2026):
+- Manté les correccions Kotlin en IosForYouSnapshot.kt i Clock.ios.kt (venien de v343).
+- Elimina iosX64() de shared/build.gradle.kts; targets iosArm64 i iosSimulatorArm64.
+- Corrigix el script compilar_ios_mac.sh que continuava requerint iosX64 en Macs Intel.
+- Afig CADisableMinimumFrameDurationOnPhone=true a Info.plist; build 345.
+- Recupera codemagic.yaml per a compilació de simulador iOS ARM64, sense signatura.
+  Hi ha una còpia a l'arrel del ZIP i una altra dins ANDROID_STUDIO, per les dos estructures de repositori.
+- Preserva Xcode project, esquema AgendaIOS i Gradle bootstrap amb verificació SHA256.
+
+Per a compilar amb Codemagic, el fitxer codemagic.yaml ha d'estar a l'arrel del repositori.
+Generarà, si el build passa, artifacts/lagenda-ios-simulator.zip amb AgendaIOS.app dins.
+La versió del simulador NO s'instal·la directament en un iPhone físic.
+
+IMPORTANT: compilació de Codemagic/Xcode NO verificada en este entorn; només comprovació estàtica
+dels fitxers, comparació de versions i integritat del ZIP. La paritat visual 1:1 també requerix prova real.

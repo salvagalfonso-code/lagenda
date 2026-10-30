@@ -1,0 +1,6 @@
+1. Els dos PHP passen php -l, però no han sigut instal·lats ni provats contra MariaDB.
+2. Fer còpia de seguretat de les rutes del servidor i provar contra una instal·lació no productiva.
+3. GET sense token -> 401; amb token vàlid -> només el perfil propi.
+4. POST sense token -> 401; amb token vàlid -> modifica només user_profiles del compte actual.
+5. Verificar casos d'error, UTF-8, camps buits, foto, eliminar foto i accés entre comptes.
+6. No obrir públicament la gestió de perfils sense l'autenticació de _bootstrap.php.

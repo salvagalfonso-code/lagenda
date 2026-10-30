@@ -148,6 +148,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
              platformReadPublicCache(iosScopedCacheKey("pref_towns", null)).isBlank())
     }
     var firstRunOpen by remember { mutableStateOf(false) }
+    var personalizationImagesRevision by remember { mutableIntStateOf(0) }
     LaunchedEffect(firstRunOpen) {
         if (firstRunOpen && IosPersonalizationImages.cached().isEmpty()) {
             runCatching { IosPersonalizationImages.ingest(api.entityStyles()) }
@@ -161,7 +162,6 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var registrationOpen by remember { mutableStateOf(false) }
     var resetOpen by remember { mutableStateOf(false) }
     var prefOpen by remember { mutableStateOf(false) }
-    var personalizationImagesRevision by remember { mutableIntStateOf(0) }
     LaunchedEffect(prefOpen) {
         if (prefOpen && IosPersonalizationImages.cached().isEmpty()) {
             runCatching { IosPersonalizationImages.ingest(api.entityStyles()) }
@@ -182,6 +182,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var account by remember { mutableStateOf<IosAccount?>(null) }
     val followSyncMutex = remember { Mutex() }
     val feedPrefsSyncMutex = remember { Mutex() }
+    var feedPrefsServerRevision by remember { mutableIntStateOf(0) }
     // Android's account ∪ guest migration: first journal, then post missing follows.
     // Never clear a journal entry before a server response confirms it.
     fun stageGuestFollows(accountId: Int) {
@@ -304,7 +305,6 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var chosenRadii by remember { mutableStateOf(IosPersonalFeedPolicy.decodeRadii(iosScopedSet("pref_radii", null))) }
     var placesWriteRevision by remember { mutableIntStateOf(0) }
     var feedPrefsWriteRevision by remember { mutableIntStateOf(0) }
-    var feedPrefsServerRevision by remember { mutableIntStateOf(0) }
 
     var visibilityWriteRevision by remember { mutableIntStateOf(0) }
     var showSuggestions by remember { mutableStateOf(platformReadPublicCache(iosScopedCacheKey("pref_suggestions",null)) != "false") }

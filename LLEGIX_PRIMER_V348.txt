@@ -1,0 +1,28 @@
+L’AGENDA V348 — COMPILACIÓ DEL SIMULADOR ARM64 (CODÉMAGIC)
+
+Base íntegra: v347. Conservar: codi d’Android, interfície iOS i correccions Kotlin v346/v347.
+
+ERROR REAL DEL REGISTRE V347:
+  Task :shared:syncComposeResourcesForIos FAILED
+  error: Unknown iOS simulator arch: 'x86_64'
+
+CAUSA:
+Xcode 26.6 exporta ARCHS="arm64 x86_64" amb el destí genèric del simulador.
+El projecte Kotlin Multiplatform només compila iosSimulatorArm64; no hi ha target iosX64.
+Kotlin iOS compila i enllaça, però Compose resources no sap sincronitzar l’arquitectura x86_64.
+
+CORRECCIONS:
+- iosApp/AgendaIOS.xcodeproj/project.pbxproj: configuracions Debug i Release fixades en
+  ARCHS = arm64 i EXCLUDED_ARCHS[sdk=iphonesimulator*] = x86_64.
+- codemagic.yaml de l’arrel i d’ANDROID_STUDIO: xcodebuild rep ARCHS=arm64 explícitament.
+- COMPROVACIONS/compilar_ios_mac.sh: xcodebuild també rep ARCHS=arm64.
+- Cap canvi de codi d'aplicació, lògica, Android, fitxers de dades o recursos d'imatges.
+
+COMPROVACIONS LOCALS:
+- Fitxers preservats excepte els 4 fitxers de compilació i aquesta nota.
+- Integritat del ZIP, estructura del projecte, YAML, coincidència de les dues configuracions.
+
+IMPORTANT:
+- No s'ha pogut executar Xcode ni iOS Simulator en aquest entorn.
+- Un nou intent de Codemagic determinarà si la compilació acaba o hi ha errors posteriors.
+- Usa el ZIP v348 complet, no el v347.

@@ -1,0 +1,36 @@
+L'AGENDA V346 — CORRECCIÓ DE COMPILACIÓ KOTLIN iOS
+
+BASE: V345 (paritat visual Android + correccions Codemagic).
+S'han conservat la interfície v344/v345, el projecte Android, els targets iOS ARM64 i la configuració Codemagic.
+
+CANVIS DE CODI (únicament 2 fitxers):
+1) ANDROID_STUDIO/shared/src/commonMain/kotlin/com/example/agendavalenciana/ios/IosForYouSnapshot.kt
+   - Substituïts els dos usos de Map.toSortedMap() (API exclusiva de JVM)
+     per entries.sortedBy { it.key } (Kotlin multiplataforma).
+   - Signatura ordenada amb la mateixa semàntica i sense alterar la selecció d'esdeveniments.
+2) ANDROID_STUDIO/shared/src/iosMain/kotlin/com/example/agendavalenciana/ios/Clock.ios.kt
+   - Timestamp mitjançant kotlin.time.Clock.System.now().toEpochMilliseconds()
+     (API estàndard de Kotlin 2.4; sense NSDate.timeIntervalSince1970).
+   - Zona horària de Madrid amb NSTimeZone(name = "Europe/Madrid")
+     (constructor Objective-C; sense NSTimeZone.timeZoneWithName).
+
+CODÉMAGIC:
+- Pots reutilitzar exactament el script de xcodebuild que vas passar: no era la causa.
+- El fitxer codemagic.yaml ja està inclòs (a l'arrel i dins ANDROID_STUDIO).
+- Si carregues el ZIP com a repositori, descomprimeix-lo de manera que el projecte estiga a ANDROID_STUDIO/.
+
+COMPROVACIONS LOCALS:
+- Codi IosForYouSnapshot compilat amb kotlinc JVM i tipus simulats: PASSA.
+- Test de signatura ordenada independent de l'ordre de maps i d'actualització de radis: PASSA.
+- Script de catàleg d'estils de l'aplicació: PASSA.
+- Script de conservació de fitxers Android: PASSA.
+- Integritat ZIP i comparació de canvis contra v345: PASSEN.
+
+NO VERIFICAT:
+- No hi ha Xcode/Kotlin-Native iOS disponible en este entorn.
+- La compilació completa, la instal·lació i l'aspecte en iPhone requereixen Codemagic.
+- El fragment de log aportat són les darreres 50 línies, per això poden existir altres errors anteriors no visibles.
+
+SI ENCARA FALLA:
+Descarrega o copia el fitxer artifacts/xcodebuild.log de Codemagic i cerca totes les línies
+que continguen 'error:' o 'e:'. Comparteix-les perquè puguem corregir qualsevol altre error.

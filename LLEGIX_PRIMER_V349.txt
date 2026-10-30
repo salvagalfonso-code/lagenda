@@ -1,0 +1,27 @@
+L’AGENDA v349 — CORRECCIÓ DE PANTALLA COMPLETA I FEED iOS
+
+Base: v348, acumulada. No s’ha modificat cap fitxer Android.
+
+CAUSES LOCALITZADES
+1. Info.plist no tenia cap pantalla d’arrancada UILaunchScreen/UILaunchStoryboardName. Pot comportar visualització a mida de compatibilitat (franges negres/letterboxing) en simuladors iPhone moderns.
+2. A Inici, el carrusel, Batecs, pestanyes i missatges estaven fora de la LazyColumn de les targetes, i ocupaven tota la superfície abans d’arribar al feed.
+3. La crida d’inici de sessió afegia una barrera visual al feed públic que no existix en la referència Android.
+
+CANVIS IMPLEMENTATS EN CODI
+- Info.plist: UILaunchScreen buit, compatible amb iOS 16+, i increment CFBundleVersion a 349.
+- ContentView.swift: superfície Compose expansiva i fons blanc també a zones segures.
+- AgendaIOSApp.swift: mode visual clar per coherència amb Android.
+- AgendaIosScreen.kt: capçalera de feed dins de la mateixa LazyColumn de les targetes; cerca queda dalt, barra inferior queda fixa.
+- AgendaIosScreen.kt: feed públic de convidat, si la selecció personalitzada és buida i no hi ha preferències, mostra el catàleg disponible.
+- El missatge invasor de login s'elimina del feed; guardats, recordatoris i perfils seguixen demanant sessió quan toca.
+
+CONSERVAT
+- Correccions v345–v348 (Kotlin/Native, API d’entrades, NSTimeZone, arquitectura arm64 i Codemagic).
+- Disseny del popup, Guardats, Notificacions i resta del codi existent.
+- Tot Android intacte.
+
+PROVA NECESSÀRIA
+- Eliminar l’app anterior del simulador (la pantalla d’inici es pot conservar en memòria cau), instal·lar v349 i verificar que no hi ha franges negres.
+- Obrir Inici i desplaçar el contingut: publicitat, Batecs si hi ha 6+ artistes seguits, filtres, targetes i càrrega progressiva.
+- Provar també Guardats, Notificacions i popup i comparar les quatre captures originals d’Android.
+- Xcode/Codemagic no estan disponibles en aquest entorn: compilació i execució v349 NO verificades.

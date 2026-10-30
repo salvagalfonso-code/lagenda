@@ -1,0 +1,9 @@
+L'AGENDA v343: COMPONENTS DE PERFIL iOS. NO ESTAN DESPLEGATS.
+1. Copia seguretat base de dades i servidor.
+2. Executa 001_PROFILE_AUTH_IOS.sql en la MariaDB real.
+3. Copia auth/*.php a app/api/auth i account/*.php a app/api/account.
+4. No substituïsques auth/google.php del web ni els PHP originals d'Android.
+5. Afig AGENDA_APPLE_IOS_BUNDLE_ID i AGENDA_GOOGLE_IOS_CLIENT_ID al servidor.
+6. Configura iOS Sign in with Apple, Google iOS OAuth client i el reversed client ID.
+7. Compila amb Xcode i prova en un entorn de proves abans de producció.
+Vegeu ANDROID_STUDIO/IMPLEMENTACIO_PERFIL_IOS_V343.md per a les limitacions i controls de privacitat.
