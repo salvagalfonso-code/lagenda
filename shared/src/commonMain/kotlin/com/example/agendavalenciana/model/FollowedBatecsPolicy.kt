@@ -2,10 +2,8 @@ package com.example.agendavalenciana.model
 
 /** Shared, deterministic selection of Batecs. Never shows an unfollowed artist. */
 data class BatecCandidate(
-    val storyKey: String,
-    val artist: String,
-    val publishedAtMillis: Long = 0L,
-    val isPlaceholder: Boolean = false
+    val storyKey: String, val artist: String,
+    val sourceType: String = "MANUAL", val publishedAt: String = ""
 )
 
 object FollowedBatecsPolicy {

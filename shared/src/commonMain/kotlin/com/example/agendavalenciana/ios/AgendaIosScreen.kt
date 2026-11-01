@@ -4,7 +4,6 @@ import com.example.agendavalenciana.model.BatecCandidate
 import com.example.agendavalenciana.model.FollowedBatecsPolicy
 import com.example.agendavalenciana.model.IosBatecArtistGroup
 import com.example.agendavalenciana.model.IosBatecArtistGroups
-import com.example.agendavalenciana.model.IosBatecTimelinePolicy
 import com.example.agendavalenciana.model.GlobalAdPlacementPolicy
 import com.example.agendavalenciana.model.IosAccountCachePolicy
 import com.example.agendavalenciana.model.IosFeedExclusionPolicy
@@ -34,6 +33,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -49,24 +50,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 private val Ink = Color(0xFF252329)
 private val Accent = Color(0xFFE8DFF2)
 private val Pale = Color(0xFFF7F6F9)
-
-/** Do not mix taste selections or reminder times between accounts on the same iPhone. */
-private fun iosScopedCacheKey(name: String, userId: Int?): String = IosAccountCachePolicy.key(name, userId)
-private fun iosScopedSet(name: String, userId: Int?): Set<String> = IosAccountCachePolicy.decode(
-    platformReadPublicCache(iosScopedCacheKey(name, userId)),
-    if (userId == null) platformReadPublicCache(name) else "", userId == null
-)
-private fun iosReminderKey(userId: Int, eventId: Int): String = IosAccountCachePolicy.reminderKey(userId, eventId)
 
 /** Native iPhone Compose screen. The original Android UI remains in app/. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -77,13 +66,11 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     val scope = rememberCoroutineScope()
     var events by remember { mutableStateOf(IosEventCatalog.cached()) }
     var updating by remember { mutableStateOf(false) }
+    var manualRefreshing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("") }
     var tab by remember { mutableStateOf("Inici") }
-    var profileReturnTab by remember { mutableStateOf("Inici") }
     var feedMode by remember { mutableStateOf("Per a tu") }
-    var selectedFeedCategory by remember { mutableStateOf<String?>(null) }
-    var activeFilterPresetName by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var appliedQuery by remember { mutableStateOf("") }
     // Query is committed only by Search / tapping a suggestion. Typing never recalculates the feed.
@@ -91,27 +78,50 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     LaunchedEffect(query) { kotlinx.coroutines.delay(240); suggestionDraft = query.trim() }
     var chosenSuggestion by remember { mutableStateOf<IosSearchSuggestion?>(null) }
     var appliedSuggestion by remember { mutableStateOf<IosSearchSuggestion?>(null) }
-    var limit by remember { mutableIntStateOf(5) }
-    // Restored only after a real background interval, not when closing a popup or changing tabs.
-    var feedExpiredEpoch by remember { mutableIntStateOf(0) }
-    DisposableEffect(sessionBridge) {
-        // Covers cold starts, including an iOS process killed while suspended.
-        if (IosFeedReadingSession.foreground()) feedExpiredEpoch++
-        sessionBridge?.setFeedLifecycleListener(object : IosFeedLifecycleCallback {
-            override fun onForeground() {
-                if (IosFeedReadingSession.foreground()) feedExpiredEpoch++
-            }
-            override fun onBackground() { IosFeedReadingSession.background() }
-        })
-        onDispose { sessionBridge?.setFeedLifecycleListener(null) }
-    }
-    LaunchedEffect(feedExpiredEpoch) {
-        if (feedExpiredEpoch > 0) limit = 5
-    }
+    var limit by remember { mutableIntStateOf(IosFeedReadingPolicy.initial) }
+    // Pas 14: only the server holds a permanent reading position. RAM serves fast UI
+    // navigation; no scroll location is stored in UserDefaults or a local preferences file.
+    val readingMemory = remember { IosFeedReadingMemory() }
+    var readingRestoreEpoch by remember { mutableIntStateOf(0) }
+    var readingPersistEpoch by remember { mutableIntStateOf(0) }
     var selected by remember { mutableStateOf<AgendaEventSummary?>(null) }
     var artist by remember { mutableStateOf<String?>(null) }
+    var pendingPushEventId by remember { mutableStateOf<Int?>(null) }
     var artistSourceEvent by remember { mutableStateOf<AgendaEventSummary?>(null) }
-    var pendingOpenEventId by remember { mutableIntStateOf(0) }
+    // Public artist data only in RAM; no cached personal or profile state in UserDefaults.
+    var artistPublicPage by remember { mutableStateOf<IosArtistPublicPage?>(null) }
+    var artistPageLoading by remember { mutableStateOf(false) }
+    var artistPageError by remember { mutableStateOf("") }
+    var artistPageRefresh by remember { mutableIntStateOf(0) }
+    LaunchedEffect(artist, artistPageRefresh) {
+        val name = artist?.takeIf(String::isNotBlank) ?: return@LaunchedEffect
+        artistPublicPage = null
+        artistPageError = ""
+        artistPageLoading = true
+        try {
+            val loaded = api.artistPublicPage(name)
+            if (artist == name) artistPublicPage = loaded
+        } catch (ex: Exception) {
+            if (artist == name) artistPageError = ex.message ?: "No s'ha pogut carregar la fitxa."
+        } finally {
+            if (artist == name) artistPageLoading = false
+        }
+    }
+
+    LaunchedEffect(sessionBridge) {
+        sessionBridge?.setFeedLifecycleListener(object : IosFeedLifecycleCallback {
+            override fun onBackground() {
+                readingMemory.markBackground(currentEpochMillis())
+                readingPersistEpoch += 1
+            }
+            override fun onForeground() {
+                if (readingMemory.foreground(currentEpochMillis())) {
+                    limit = IosFeedReadingPolicy.initial
+                    readingRestoreEpoch += 1
+                }
+            }
+        })
+    }
     LaunchedEffect(sessionBridge) {
         sessionBridge?.setPushOpenListener(object : IosPushOpenCallback {
             override fun onOpenArtist(artistName: String) {
@@ -122,173 +132,106 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 }
             }
             override fun onOpenEvent(eventId: Int) {
-                if (eventId > 0) pendingOpenEventId = eventId
+                if (eventId > 0) pendingPushEventId = eventId
             }
         })
     }
+    LaunchedEffect(pendingPushEventId, events) {
+        val id = pendingPushEventId ?: return@LaunchedEffect
+        val match = events.firstOrNull { it.id == id } ?: return@LaunchedEffect
+        pendingPushEventId = null
+        tab = "Inici"
+        selected = match
+    }
     var festivalMatchedArtist by remember { mutableStateOf("") }
     var savedFestivalRevision by remember { mutableIntStateOf(0) }
+    // RAM-only optimistic projection of encrypted pending writes, scoped to the user.
+    // It must never become a second persistent source of truth.
+    var festivalSlotOverrides by remember { mutableStateOf<Map<Pair<Int, Int>, Set<String>>>(emptyMap()) }
     var batecStoryKey by remember { mutableStateOf<String?>(null) }
+    // Snapshot in RAM: a seen confirmation may reorder the strip, never the open viewer.
+    var batecViewerGroups by remember { mutableStateOf(emptyList<IosBatecArtistGroup>()) }
+    var batecViewerStories by remember { mutableStateOf(emptyList<IosBatec>()) }
+    var batecViewerOwnerId by remember { mutableStateOf<Int?>(null) }
     var batecsReturnEpoch by remember { mutableIntStateOf(0) }
     fun closeBatecs() {
         batecStoryKey = null
+        batecViewerGroups = emptyList()
+        batecViewerStories = emptyList()
+        batecViewerOwnerId = null
         batecsReturnEpoch += 1
     }
     var searchFiltersOpen by remember { mutableStateOf(false) }
+    var searchTown by remember { mutableStateOf("") }
+    var searchCategory by remember { mutableStateOf("") }
+    var searchComarca by remember { mutableStateOf("") }
+    var searchStyle by remember { mutableStateOf("") }
+    var searchRadius by remember { mutableIntStateOf(0) }
+    var searchFromDate by remember { mutableStateOf("") }
+    var searchToDate by remember { mutableStateOf("") }
+    var searchMonth by remember { mutableStateOf("") }
+    var searchPriceLimit by remember { mutableStateOf<Int?>(null) }
+    var searchFreeOnly by remember { mutableStateOf(false) }
+    var searchCategories by remember { mutableStateOf(emptySet<String>()) }
+    var searchPresetRevision by remember { mutableIntStateOf(0) }
+    var searchPresetSaving by remember { mutableStateOf(false) }
     var appliedSearchFilters by remember { mutableStateOf(IosSearchFilters()) }
     var searchPresets by remember { mutableStateOf(emptyList<IosSavedSearch>()) }
+    var newSearchName by remember { mutableStateOf("") }
+    var publisherMenuOpen by remember { mutableStateOf(false) }
+    var adminDestination by remember { mutableStateOf("Resum") }
+    var serverPublisherAccess by remember { mutableStateOf<IosPublisherSnapshot?>(null) }
     var loginOpen by remember { mutableStateOf(false) }
-    // Shown only after an anonymous first launch, never after signing out of an existing account.
-    val initialGuestOnboardingEligible = remember {
-        platformReadPublicCache("ios_first_run_state_v350") == "offered" ||
-            (platformReadPublicCache("ios_first_run_state_v350").isBlank() &&
-             platformReadPublicCache("events_at").isBlank() &&
-             platformReadPublicCache(IosGuestFollowTransfer.GUEST_KEY).isBlank() &&
-             platformReadPublicCache(iosScopedCacheKey("pref_categories", null)).isBlank() &&
-             platformReadPublicCache(iosScopedCacheKey("pref_towns", null)).isBlank())
-    }
-    var firstRunOpen by remember { mutableStateOf(false) }
-    var personalizationImagesRevision by remember { mutableIntStateOf(0) }
-    LaunchedEffect(firstRunOpen) {
-        if (firstRunOpen && IosPersonalizationImages.cached().isEmpty()) {
-            runCatching { IosPersonalizationImages.ingest(api.entityStyles()) }
-                .onSuccess { personalizationImagesRevision++ }
-        }
-    }
-    fun completeFirstRun() {
-        platformWritePublicCache("ios_first_run_state_v350", "done")
-        firstRunOpen = false
-    }
     var registrationOpen by remember { mutableStateOf(false) }
     var resetOpen by remember { mutableStateOf(false) }
     var prefOpen by remember { mutableStateOf(false) }
-    // Account preferences must be re-read before showing a signed-in user's selections.
-    var prefSyncPending by remember { mutableStateOf(false) }
-    var prefSyncError by remember { mutableStateOf("") }
-    var prefRefreshEpoch by remember { mutableIntStateOf(0) }
-    LaunchedEffect(prefOpen) {
-        if (prefOpen && IosPersonalizationImages.cached().isEmpty()) {
-            runCatching { IosPersonalizationImages.ingest(api.entityStyles()) }
-                .onSuccess { personalizationImagesRevision++ }
-        }
-    }
     var notificationsOpen by remember { mutableStateOf(false) }
     var communityGroup by remember { mutableStateOf<IosCommunityGroup?>(null) }
-    val guestFollowTransfer = remember {
-        IosGuestFollowTransfer(::platformReadPublicCache, ::platformWritePublicCache)
-    }
-    fun guestUserState(): IosUserState = IosUserState(
-        follows = guestFollowTransfer.guest(),
-        saved = iosScopedSet("saved_events", null).mapNotNull(String::toIntOrNull).filter { it > 0 }.toSet(),
-        alerts = iosScopedSet("alert_events", null).mapNotNull(String::toIntOrNull).filter { it > 0 }.toSet()
-    )
-    var user by remember { mutableStateOf(guestUserState()) }
+    var user by remember { mutableStateOf(IosUserState()) }
     var account by remember { mutableStateOf<IosAccount?>(null) }
-    val followSyncMutex = remember { Mutex() }
-    val feedPrefsSyncMutex = remember { Mutex() }
-    var feedPrefsServerRevision by remember { mutableIntStateOf(0) }
-    // A remote GET must never overwrite an explicit category edit awaiting confirmation.
-    var categoryWriteRevision by remember { mutableIntStateOf(0) }
-    // Android's account ∪ guest migration: first journal, then post missing follows.
-    // Never clear a journal entry before a server response confirms it.
-    fun stageGuestFollows(accountId: Int) {
-        val guestCategories = (iosScopedSet("pref_categories", null) + iosScopedSet("pref_subcategories", null))
-            .map { IosPersonalizationTaxonomy.canonicalFollowKey(it) }
-            .filter { key -> key in IosPersonalizationTaxonomy.categories.map { it.code } ||
-                key == "CHILDREN" || IosPersonalizationTaxonomy.subcategories.any { it.code == key } }
-            .map { key ->
-                val label = IosPersonalizationTaxonomy.categoryLabel(key).let { if (it == key)
-                    IosPersonalizationTaxonomy.subcategoryLabel(key) else it }
-                IosFollow("CATEGORY", key, label)
-            }
-        val staged = guestFollowTransfer.stage(accountId, guestCategories)
-        if (guestCategories.all { IosGuestFollowTransfer.contains(staged, it) } &&
-            guestCategories.all { IosGuestFollowTransfer.contains(guestFollowTransfer.pending(accountId), it) }) {
-            // Guest category tastes must not be accidentally imported into a SECOND account.
-            platformWritePublicCache(iosScopedCacheKey("pref_categories",null), "~")
-            platformWritePublicCache(iosScopedCacheKey("pref_subcategories",null), "~")
+    LaunchedEffect(account?.id, tab) {
+        val id = account?.id
+        serverPublisherAccess = null
+        if (id != null && tab == "Perfil") {
+            val verified = runCatching { api.publisherSnapshot() }.getOrNull()
+            if (account?.id == id) serverPublisherAccess = verified
         }
     }
-    // Stage anonymous first-run locations before switching scopes. The account and guest
-    // locations remain isolated and failed writes stay pending for the next login.
-    fun stageGuestFirstRunPlaces(accountId: Int) {
-        if (accountId <= 0) return
-        val guestTowns = iosScopedSet("pref_towns", null)
-        if (guestTowns.isEmpty()) return
-        val guestRadii = IosPersonalFeedPolicy.decodeRadii(iosScopedSet("pref_radii", null))
-        val accountTowns = iosScopedSet("pref_towns", accountId)
-        val accountRadii = IosPersonalFeedPolicy.decodeRadii(iosScopedSet("pref_radii", accountId))
-        val pendingTowns = iosScopedSet("intro_pending_towns", accountId) + guestTowns
-        val mergedRadii = accountRadii + guestTowns.associateWith {
-            guestRadii[it] ?: PersonalizationOptions.defaultRadiusKm
+    // Pas 4: never persist the server snapshot on the phone; keep it only in RAM.
+    // Its revision is useful for future optimistic writes in step 5.
+    var serverState by remember { mutableStateOf<IosHydratedServerState?>(null) }
+    var guestReadyUserId by remember { mutableStateOf<Int?>(null) }
+    var serverStateRefreshEpoch by remember { mutableIntStateOf(0) }
+    suspend fun updateFestivalSlots(owner: Int, eventId: Int, selected: Set<String>): Boolean {
+        require(owner > 0 && eventId > 0)
+        check((account?.id ?: guestReadyUserId) == owner) { "La sessió ha canviat" }
+        val confirmed = try {
+            api.savePersonalState(owner, mapOf(
+                "ios_festival_schedule_${eventId}" to IosPersonalEncoded.strings(selected)))
+            true
+        } catch (_: IosQueuedForRetryException) {
+            // The secure queue has already persisted the write and will retry it.
+            false
         }
-        platformWritePublicCache(iosScopedCacheKey("intro_pending_towns", accountId),
-            IosAccountCachePolicy.encode(pendingTowns))
-        platformWritePublicCache(iosScopedCacheKey("pref_towns", accountId),
-            IosAccountCachePolicy.encode(accountTowns + guestTowns))
-        platformWritePublicCache(iosScopedCacheKey("pref_radii", accountId),
-            IosAccountCachePolicy.encode(IosPersonalFeedPolicy.encodeRadii(mergedRadii)))
-        platformWritePublicCache(iosScopedCacheKey("pref_places_dirty", accountId), "true")
-        // Clear guest only after the account-scoped journal has round-tripped.
-        if (guestTowns.all { it in iosScopedSet("intro_pending_towns", accountId) }) {
-            platformWritePublicCache(iosScopedCacheKey("pref_towns", null), "~")
-            platformWritePublicCache(iosScopedCacheKey("pref_radii", null), "~")
-        }
+        check((account?.id ?: guestReadyUserId) == owner) { "La sessió ha canviat" }
+        festivalSlotOverrides = festivalSlotOverrides + ((owner to eventId) to selected)
+        savedFestivalRevision += 1
+        if (confirmed) serverStateRefreshEpoch += 1
+        return confirmed
     }
-    suspend fun synchronizeGuestFollows(accountId: Int, remoteFollows: List<IosFollow>) {
-        var updatedOnServer = false
-        followSyncMutex.withLock {
-            if (account?.id != accountId) return@withLock
-            // A remote read may already contain a previous successful POST.
-            remoteFollows.filter { remote ->
-                guestFollowTransfer.pending(accountId).any { pending ->
-                    IosGuestFollowTransfer.contains(listOf(remote), pending)
-                }
-            }.forEach { guestFollowTransfer.acknowledge(accountId, it) }
-            for (follow in guestFollowTransfer.missing(accountId, remoteFollows)) {
-                if (account?.id != accountId) break
-                // Continue with later entities even when one post fails.
-                val confirmed = runCatching { api.followEntity(follow.type, follow.key, follow.label, true) }.isSuccess
-                if (confirmed) {
-                    guestFollowTransfer.acknowledge(accountId, follow)
-                    updatedOnServer = true
-                }
-            }
-        }
-        if (account?.id == accountId && updatedOnServer) {
-            // Registered users' category follows are read from MariaDB by for-you/feed.php.
-            // Rerun that selection only after follow.php confirms the server-side update.
-            feedPrefsServerRevision += 1
-            platformWritePublicCache("for_you_${accountId}_signature", "")
-        }
-        if (account?.id == accountId && guestFollowTransfer.pending(accountId).isNotEmpty())
-            status = "Alguns seguiments encara estan pendents de sincronitzar"
-    }
-    // On a cold launch the Keychain may already belong to a logged-in user.
-    // Never overwrite that user's stored reading position with a temporary guest feed
-    // while auth/me.php is resolving (or the network is unavailable).
-    var awaitingInitialAccount by remember { mutableStateOf(!api.token.isNullOrBlank()) }
     var notices by remember { mutableStateOf(emptyList<IosNotification>()) }
-    var notificationPreferences by remember(account?.id) {
-        mutableStateOf(IosNotificationPreferences.decode(platformReadPublicCache(iosScopedCacheKey("notification_preferences",account?.id))))
-    }
-    var readLocalNotifications by remember(account?.id) {
-        mutableStateOf(iosScopedSet("notification_read",account?.id))
-    }
-    var dismissedLocalNotifications by remember(account?.id) {
-        mutableStateOf(iosScopedSet("notification_dismissed",account?.id))
-    }
-    fun markLocalNotificationRead(key: String) {
-        readLocalNotifications = readLocalNotifications + key
-        platformWritePublicCache(iosScopedCacheKey("notification_read",account?.id),IosAccountCachePolicy.encode(readLocalNotifications))
-    }
+    var notificationSettings by remember { mutableStateOf(IosNotificationCenterSettings()) }
+    var notificationSettingsRevision by remember { mutableIntStateOf(0) }
+    var notificationSettingsBusy by remember { mutableStateOf(false) }
+    var notificationSettingsLoadedOwner by remember { mutableStateOf<Int?>(null) }
 
     var tickets by remember { mutableStateOf(emptyList<IosTicket>()) }
+    var ticketsOffline by remember { mutableStateOf(false) }
+    var ticketLoadNotice by remember { mutableStateOf("") }
     var groups by remember { mutableStateOf(emptyList<IosCommunityGroup>()) }
     var batecs by remember { mutableStateOf(emptyList<IosBatec>()) }
     var seenBatecs by remember { mutableStateOf(emptySet<String>()) }
-    var batecRecentEventCreations by remember { mutableStateOf(emptyMap<Int, Long>()) }
-    var batecClockTick by remember { mutableLongStateOf(currentEpochMillis()) }
+    var batecsRefreshEpoch by remember { mutableIntStateOf(0) }
     var paid by remember { mutableStateOf(IosPromoted()) }
     // One popup per local calendar date, as in Android; never lock navigation for feeds.
     var popupAd by remember { mutableStateOf<IosAd?>(null) }
@@ -304,513 +247,400 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         festivalMatchedArtist = ""
     }
     var entityStyles by remember { mutableStateOf(IosEntityAffinityCatalog.cached()) }
-    var chosenCategories by remember { mutableStateOf(iosScopedSet("pref_categories", null)) }
-    var chosenTowns by remember { mutableStateOf(iosScopedSet("pref_towns", null)) }
-    var chosenSubcategories by remember { mutableStateOf(iosScopedSet("pref_subcategories", null)) }
-    var chosenComarques by remember { mutableStateOf(iosScopedSet("pref_comarques", null)) }
-    var chosenRadii by remember { mutableStateOf(IosPersonalFeedPolicy.decodeRadii(iosScopedSet("pref_radii", null))) }
-    var placesWriteRevision by remember { mutableIntStateOf(0) }
-    var feedPrefsWriteRevision by remember { mutableIntStateOf(0) }
-
-    var visibilityWriteRevision by remember { mutableIntStateOf(0) }
-    var showSuggestions by remember { mutableStateOf(platformReadPublicCache(iosScopedCacheKey("pref_suggestions",null)) != "false") }
-    var valencianFirst by remember { mutableStateOf(platformReadPublicCache(iosScopedCacheKey("pref_valencian",null)) != "false") }
+    var chosenCategories by remember { mutableStateOf(emptySet<String>()) }
+    var chosenTowns by remember { mutableStateOf(emptySet<String>()) }
+    var chosenSubcategories by remember { mutableStateOf(emptySet<String>()) }
+    var chosenComarques by remember { mutableStateOf(emptySet<String>()) }
+    var chosenRadii by remember { mutableStateOf(emptyMap<String, Int>()) }
+    // Do not apply an older GET response over a new in-flight user choice.
+    var locationEditRevision by remember { mutableIntStateOf(0) }
+    var feedEditRevision by remember { mutableIntStateOf(0) }
+    // Reject a follow GET that started before an in-flight or queued edit.
+    var followEditRevision by remember { mutableIntStateOf(0) }
+    // One in-flight action per event; older server snapshots must not roll back guardats.
+    var savedEditRevision by remember { mutableIntStateOf(0) }
+    var savingEventIds by remember { mutableStateOf(emptySet<Int>()) }
+    var uiLanguage by remember { mutableStateOf(IosUiLanguage.VALENCIAN) }
+    var showSuggestions by remember { mutableStateOf(true) }
+    var valencianFirst by remember { mutableStateOf(true) }
     var discoveryLevel by remember { mutableStateOf(DiscoveryLevel.BALANCED) }
-    var learningResetRevision by remember { mutableIntStateOf(0) }
-    var personalizationPushEnabled by remember(account?.id) {
-        mutableStateOf(platformReadPublicCache(iosScopedCacheKey("pref_ios_push",account?.id)) == "true")
-    }
 
-    // Personal feed exclusions are local and namespace-scoped by account.
-    var excludedEventIds by remember { mutableStateOf(iosScopedSet("hidden_events", null).mapNotNull(String::toIntOrNull).toSet()) }
-    var excludedArtists by remember { mutableStateOf(iosScopedSet("hidden_artists", null)) }
-    var excludedCategories by remember { mutableStateOf(iosScopedSet("hidden_categories", null)) }
+    // Personal feed exclusions are hydrated only from the server, never UserDefaults.
+    var excludedEventIds by remember { mutableStateOf(emptySet<Int>()) }
+    var excludedArtists by remember { mutableStateOf(emptySet<String>()) }
+    var excludedCategories by remember { mutableStateOf(emptySet<String>()) }
+    var visibilityEditRevision by remember { mutableIntStateOf(0) }
+    // Pending times are RAM-only and owner-scoped; encrypted queue is the durable offline source.
+    var reminderTimeOverrides by remember { mutableStateOf(emptyMap<Pair<Int, Int>, String>()) }
+    fun remoteReminderTime(eventId: Int): String {
+        val owner = account?.id ?: guestReadyUserId
+        val pending = owner?.let { reminderTimeOverrides[it to eventId] }
+        if (pending != null) return pending
+        return serverState?.takeIf { it.userId == owner }?.central?.long("when_$eventId")
+            ?.takeIf { it > 0 }?.let { IosNativeBridge.current?.formatReminderEpochMillis(it) }.orEmpty()
+    }
     var alertToDisable by remember { mutableStateOf<AgendaEventSummary?>(null) }
     var reminderToSchedule by remember { mutableStateOf<AgendaEventSummary?>(null) }
     var ticketEvent by remember { mutableStateOf<AgendaEventSummary?>(null) }
-    var groupCreateFor by remember { mutableStateOf<AgendaEventSummary?>(null) }
-    // Android's + menu, role-aware and refreshed each time it opens.
-    var publisherOpen by remember { mutableStateOf(false) }
-    var publisherLoading by remember { mutableStateOf(false) }
-    var publisherRole by remember { mutableStateOf<String?>(null) }
-    var publisherOwnEvents by remember { mutableStateOf(emptyList<IosOwnPublishedEvent>()) }
-    var publisherSuspended by remember { mutableStateOf(false) }
-    var publisherWarning by remember { mutableStateOf<String?>(null) }
-    var publisherDestination by remember { mutableStateOf<IosPublishAction?>(null) }
-    var publisherRequestOpen by remember { mutableStateOf(false) }
-    LaunchedEffect(publisherOpen, account?.id) {
-        if (!publisherOpen) return@LaunchedEffect
-        val requestedId = account?.id
-        publisherRole = account?.role
-        publisherOwnEvents = emptyList() // Don't show old account ownership while verifying.
-        publisherSuspended = false
-        publisherWarning = null
-        publisherLoading = true
-        try {
-            coroutineScope {
-                val accessRequest = if (requestedId == null) null else async {
-                    runCatching { api.publisherAccess() }
-                }
-                val trustRequest = if (requestedId == null) null else async {
-                    runCatching { api.publicationTrust() }
-                }
-                val ownedRequest = async { runCatching { api.ownPublishedEvents(IosGuestIdentity.get()) } }
-                val access = accessRequest?.await()
-                val trust = trustRequest?.await()
-                val owned = ownedRequest.await()
-                if (!publisherOpen || account?.id != requestedId) return@coroutineScope
-                if (access != null) {
-                    access.onSuccess { value ->
-                        publisherRole = value.role
-                        account = account?.copy(role = value.role)
-                    }.onFailure {
-                        publisherWarning = "No s'ha pogut refrescar el rol professional. Es mostra el rol de la sessió."
-                    }
-                }
-                trust?.onSuccess { publisherSuspended = it.suspended }
-                owned.onSuccess { publisherOwnEvents = it }
-                    .onFailure { publisherWarning = "No s'han pogut carregar les teues publicacions." }
-            }
-        } finally { if (publisherOpen && account?.id == requestedId) publisherLoading = false }
+    // Only RAM (never local persistent user data). Keeps pending server order IDs
+    // across opening/closing the entry dialog, separated by server user/event.
+    var pendingTicketPayments by remember {
+        mutableStateOf(mapOf<Pair<Int, Int>, IosTicketPaymentStart>())
     }
+    var groupCreateFor by remember { mutableStateOf<AgendaEventSummary?>(null) }
     var validatorOpen by remember { mutableStateOf(false) }
     var savedLists by remember { mutableStateOf(emptyList<IosSavedList>()) }
+    var savedListsRevision by remember { mutableIntStateOf(0) }
     var profileSettings by remember { mutableStateOf<IosProfileSettings?>(null) }
-    var profileSaving by remember { mutableStateOf(false) }
     var profileSettingsOpen by remember { mutableStateOf(false) }
     var myProfile by remember { mutableStateOf<IosMyProfile?>(null) }
     var editProfileOpen by remember { mutableStateOf(false) }
+    var editAccountOpen by remember { mutableStateOf(false) }
     var deleteAccountOpen by remember { mutableStateOf(false) }
     var reportEvent by remember { mutableStateOf<AgendaEventSummary?>(null) }
     var pendingFollows by remember { mutableStateOf(emptySet<String>()) }
+    var organizerAccountKeys by remember { mutableStateOf(emptyMap<String, String>()) }
+    fun resolvedFollowKey(type: String, labelOrKey: String): String {
+        val raw = labelOrKey.trim()
+        if (type == "CATEGORY") return IosCategoryTaxonomy.mainKey(raw) ?: raw
+        if (type != "ORGANIZER") return raw
+        // For existing follows, preserve the exact user_follows.entity_key even if the
+        // public-facing label differs from its username.
+        val existing = user.follows.filter { it.type.equals("ORGANIZER", true) &&
+            IosFollowMutation.canonicalKey(it.label) == IosFollowMutation.canonicalKey(raw) }
+        return existing.singleOrNull()?.key ?: organizerAccountKeys[IosFollowMutation.canonicalKey(raw)] ?: raw
+    }
     var artistBells by remember { mutableStateOf(emptyMap<String, IosArtistBell>()) }
     var artistBellEditing by remember { mutableStateOf<String?>(null) }
 
 
     fun work(action: suspend () -> Unit) {
         scope.launch {
-            try { error = ""; action() } catch (e: Exception) { error = e.message ?: "No s'ha pogut completar l'operació." }
+            try { error = ""; action() }
+            catch (e: IosQueuedForRetryException) {
+                status = e.message ?: "Acció pendent de sincronitzar"
+            }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { error = e.message ?: "No s'ha pogut completar l'operació." }
         }
     }
-    // User follows are the shared Android/iOS source of truth for account categories.
-    // Do not leave Personalització reading stale device-only selections after sign-in.
-    fun applyAccountCategoryFollows(accountId: Int, follows: List<IosFollow>) {
-        if (account?.id != accountId) return
-        // Keep locally edited choices until the matching POSTs have been acknowledged.
-        if (platformReadPublicCache(iosScopedCacheKey("pref_categories_dirty",accountId)) == "true") return
-        val keys = follows.asSequence()
-            .filter { it.type.equals("CATEGORY", ignoreCase = true) }
-            .map { IosPersonalizationTaxonomy.canonicalFollowKey(it.key) }
-            .toSet()
-        val validCats = IosPersonalizationTaxonomy.categories.map { it.code }.toSet() + "CHILDREN"
-        val validSubs = IosPersonalizationTaxonomy.subcategories.map { it.code }.toSet()
-        val cats = keys.intersect(validCats)
-        val subs = keys.intersect(validSubs)
-        // Preserve custom, non-taxonomy styles; standard category choices follow the server.
-        val extraStyles = chosenSubcategories.filterNot {
-            IosPersonalizationTaxonomy.canonicalFollowKey(it) in validSubs
-        }.toSet()
-        chosenCategories = cats
-        chosenSubcategories = subs + extraStyles
-        platformWritePublicCache(iosScopedCacheKey("pref_categories",accountId), IosAccountCachePolicy.encode(cats))
-        platformWritePublicCache(iosScopedCacheKey("pref_subcategories",accountId), IosAccountCachePolicy.encode(subs + extraStyles))
-    }
-    /** Resumable account-scoped category journal. Never mark synced after a failed POST.
-     * The server is authoritative again only after all edits and a fresh GET succeed.
-     */
-    suspend fun synchronizePendingCategories(accountId: Int) {
-        val dirtyKey = iosScopedCacheKey("pref_categories_dirty", accountId)
-        if (account?.id != accountId || platformReadPublicCache(dirtyKey) != "true") return
-        followSyncMutex.withLock {
-            if (account?.id != accountId || platformReadPublicCache(dirtyKey) != "true") return@withLock
-            val revision = categoryWriteRevision
-            val remote = runCatching { api.userState() }.getOrNull()
-            if (remote == null) {
-                if (account?.id == accountId) error = "Categories pendents: no es pot llegir el compte al servidor."
-                return@withLock
-            }
-            val validKeys = IosPersonalizationTaxonomy.categories.map { it.code }.toSet() +
-                IosPersonalizationTaxonomy.subcategories.map { it.code }.toSet() + "CHILDREN"
-            val desired = (iosScopedSet("pref_categories",accountId) + iosScopedSet("pref_subcategories",accountId))
-                .map(IosPersonalizationTaxonomy::canonicalFollowKey).filter { it in validKeys }.toSet()
-            val current = remote.follows.filter { it.type.equals("CATEGORY",true) }
-                .map { IosPersonalizationTaxonomy.canonicalFollowKey(it.key) }.toSet()
-            val operations = (current - desired).map { it to false } + (desired - current).map { it to true }
-            var failures = 0
-            for ((key, following) in operations) {
-                if (account?.id != accountId || categoryWriteRevision != revision) return@withLock
-                val label = IosPersonalizationTaxonomy.categoryLabel(key).let {
-                    if (it == key) IosPersonalizationTaxonomy.subcategoryLabel(key) else it
-                }
-                runCatching { api.followEntity("CATEGORY",key,label,following) }
-                    .onFailure { failures++ }
-            }
-            if (account?.id != accountId || categoryWriteRevision != revision) return@withLock
-            if (failures > 0) {
-                error = "$failures categories pendents de sincronització amb el servidor."
-                return@withLock
-            }
-            // A successful POST alone is not proof the account state was refreshed.
-            val confirmed = runCatching { api.userState() }.getOrNull()
-            if (confirmed == null) {
-                error = "Categories guardades, però falta confirmar-les amb el servidor."
-                return@withLock
-            }
-            platformWritePublicCache(dirtyKey,"false")
-            user = confirmed.copy(follows = guestFollowTransfer.preview(accountId,confirmed.follows))
-            applyAccountCategoryFollows(accountId,user.follows)
-            feedPrefsServerRevision += 1
-            platformWritePublicCache("for_you_${accountId}_signature","")
-        }
-    }
-
     fun refresh(force: Boolean = false) {
         if (updating) return
-        val requestedAccountId = account?.id
         updating = true
+        if (force) manualRefreshing = true
+        val followRevisionBeforeRead = followEditRevision
+        val followOwnerBeforeRead = account?.id ?: guestReadyUserId
         work {
             try {
                 events = IosEventCatalog.get(force)
                 paid = runCatching { api.promoted() }.getOrDefault(paid)
                 entityStyles = withContext(Dispatchers.Default) { IosEntityAffinityCatalog.refresh(api, force) }
-                if (requestedAccountId != null) {
-                    val refreshedUser = runCatching { api.userState() }.getOrNull()
-                    if (account?.id == requestedAccountId && refreshedUser != null) {
-                        user = refreshedUser.copy(follows = guestFollowTransfer.preview(requestedAccountId, refreshedUser.follows))
-                        applyAccountCategoryFollows(requestedAccountId, user.follows)
-                        synchronizeGuestFollows(requestedAccountId, refreshedUser.follows)
-                        synchronizePendingCategories(requestedAccountId)
+                if (api.activePersonalId() != null) runCatching { api.userState() }.onSuccess { fresh ->
+                    if (followRevisionBeforeRead == followEditRevision &&
+                        followOwnerBeforeRead == (account?.id ?: guestReadyUserId)) {
+                        user = fresh
+                        val selectedCategories = IosCategoryTaxonomy.fromServer(fresh.follows)
+                        chosenCategories = selectedCategories.categories
+                        chosenSubcategories = selectedCategories.subcategories
                     }
                 }
-                val newPublications = runCatching { api.batecs(user.follows.filter { it.type.equals("ARTIST", true) }
-                    .map { it.label }.toSet()) }.getOrNull()
-                if (account?.id == requestedAccountId) newPublications?.let { batecs = it }
-                if (requestedAccountId != null && account?.id == requestedAccountId) {
-                    runCatching { api.recentBatecEventCreations() }.onSuccess { batecRecentEventCreations = it }
-                }
                 if (force) status = "Agenda actualitzada"
-            } finally { updating = false }
-        }
-    }
-    fun useAccountPreferences(id: Int?) {
-        chosenCategories = iosScopedSet("pref_categories", id)
-        chosenTowns = iosScopedSet("pref_towns", id)
-        chosenSubcategories = iosScopedSet("pref_subcategories", id)
-        chosenComarques = iosScopedSet("pref_comarques", id)
-        chosenRadii = IosPersonalFeedPolicy.decodeRadii(iosScopedSet("pref_radii",id))
-        showSuggestions = platformReadPublicCache(iosScopedCacheKey("pref_suggestions",id)) != "false"
-        valencianFirst = platformReadPublicCache(iosScopedCacheKey("pref_valencian",id)) != "false"
-        discoveryLevel = runCatching { DiscoveryLevel.valueOf(platformReadPublicCache(iosScopedCacheKey("pref_discovery",id))) }.getOrDefault(DiscoveryLevel.BALANCED)
-
-        excludedEventIds = iosScopedSet("hidden_events", id).mapNotNull(String::toIntOrNull).toSet()
-        excludedArtists = iosScopedSet("hidden_artists", id)
-        excludedCategories = iosScopedSet("hidden_categories", id)
-    }
-    // First-run and Personalització share the exact same guest state and follow migration.
-    // A subcategory selection narrows the parent discipline; it does not imply the whole category.
-    fun saveGuestFirstRun(cats: Set<String>, styles: Set<String>, locations: Map<String, Int>, artists: Set<String>) {
-        if (account != null) return
-        val followKeys = IosFirstRunPolicy.followKeys(cats, styles)
-        chosenCategories = followKeys.intersect(IosFirstRunPolicy.disciplines.toSet())
-        chosenSubcategories = followKeys.filter { it.contains("__") }.toSet()
-        chosenTowns = locations.keys
-        chosenRadii = locations.mapValues { PersonalizationOptions.validRadius(it.value) }
-        platformWritePublicCache(iosScopedCacheKey("pref_categories", null), IosAccountCachePolicy.encode(chosenCategories))
-        platformWritePublicCache(iosScopedCacheKey("pref_subcategories", null), IosAccountCachePolicy.encode(chosenSubcategories))
-        platformWritePublicCache(iosScopedCacheKey("pref_towns", null), IosAccountCachePolicy.encode(chosenTowns))
-        platformWritePublicCache(iosScopedCacheKey("pref_radii", null),
-            IosAccountCachePolicy.encode(IosPersonalFeedPolicy.encodeRadii(chosenRadii)))
-        val rest = user.follows.filterNot { it.type.equals("CATEGORY",true) || it.type.equals("ARTIST",true) }
-        val categoryFollows = followKeys.map { key ->
-            val label = if (key.contains("__")) IosPersonalizationTaxonomy.subcategoryLabel(key)
-                else IosPersonalizationTaxonomy.categoryLabel(key)
-            IosFollow("CATEGORY",key,label)
-        }
-        val artistFollows = artists.map { IosFollow("ARTIST",it,it) }
-        val nextFollows = IosGuestFollowTransfer.union(rest, categoryFollows + artistFollows)
-        guestFollowTransfer.setGuest(nextFollows)
-        user = user.copy(follows = nextFollows)
-    }
-    suspend fun reconcileFeedPreferences(expectedAccount: Int, expectedRevision: Int, remote: IosServerFeedPreferences?) {
-        if (account?.id != expectedAccount) return
-        if (remote == null) {
-            error = "No s'han pogut recuperar Suggerències, Descoberta i Idioma del servidor. Comprova l'API de preferències."
-            return
-        }
-        val dirtyKey = iosScopedCacheKey("pref_feed_dirty", expectedAccount)
-        val dirty = platformReadPublicCache(dirtyKey) == "true"
-        if (feedPrefsWriteRevision != expectedRevision) return // a newer UI edit wins
-        if (dirty || !remote.exists) {
-            // For old accounts seed their account-local choices exactly once; persist offline edits.
-            feedPrefsSyncMutex.withLock {
-                if (account?.id != expectedAccount || feedPrefsWriteRevision != expectedRevision) return@withLock
-                runCatching { api.saveFeedPreferences(showSuggestions, discoveryLevel.name, valencianFirst) }
-                    .onSuccess { if (account?.id == expectedAccount && feedPrefsWriteRevision == expectedRevision) {
-                        platformWritePublicCache(dirtyKey,"false")
-                        feedPrefsServerRevision += 1
-                    } }
-                    .onFailure { if (account?.id == expectedAccount) {
-                        platformWritePublicCache(dirtyKey,"true")
-                        error = "Preferències de Per a tu pendents de sincronització: ${it.message.orEmpty()}"
-                    } }
+            } finally {
+                updating = false
+                if (force) manualRefreshing = false
             }
-        } else {
-            showSuggestions = remote.suggestions
-            valencianFirst = remote.valencianFirst
-            discoveryLevel = runCatching { DiscoveryLevel.valueOf(remote.discovery) }.getOrDefault(DiscoveryLevel.BALANCED)
-            platformWritePublicCache(iosScopedCacheKey("pref_suggestions",expectedAccount),showSuggestions.toString())
-            platformWritePublicCache(iosScopedCacheKey("pref_discovery",expectedAccount),discoveryLevel.name)
-            platformWritePublicCache(iosScopedCacheKey("pref_valencian",expectedAccount),valencianFirst.toString())
         }
     }
+    // An account switch resets personal UI state until its own server snapshot arrives.
+    fun useAccountPreferences(id: Int?) {
+        // A guest/registered account transition must not reopen a previous person's editor.
+        editAccountOpen = false; editProfileOpen = false; profileSettingsOpen = false
+        tickets = emptyList(); ticketsOffline = false; ticketLoadNotice = ""
+        profileSettings = null; myProfile = null
+        searchPresetRevision += 1
+        searchPresets = emptyList()
+        searchPresetSaving = false
+        followEditRevision += 1 // invalidate any GET launched for a previous account
+        chosenCategories = emptySet(); chosenTowns = emptySet(); chosenSubcategories = emptySet()
+        chosenComarques = emptySet(); chosenRadii = emptyMap()
+        showSuggestions = true; valencianFirst = true; discoveryLevel = DiscoveryLevel.BALANCED
+        uiLanguage = IosUiLanguage.VALENCIAN
+        excludedEventIds = emptySet(); excludedArtists = emptySet(); excludedCategories = emptySet()
+        batecs = emptyList()
+        serverState = null
+        notificationSettings = IosNotificationCenterSettings()
+        IosNativeBridge.current?.setPushDeliveryEnabled(false)
+        notificationSettingsLoadedOwner = null
+        notificationSettingsRevision += 1
+    }
+    /** On network failure retain ONLY the pre-fetched encrypted tickets for the same owner.
+     * Never treat the cached status as authoritative for entry validation.
+     */
     fun loadAccountPages() {
         val expectedAccount = account?.id ?: return
+        val followRevisionBeforeRead = followEditRevision
+        val savedRevisionBeforeRead = savedEditRevision
+        val listsRevisionBeforeRead = savedListsRevision
+        val presetsRevisionBeforeRead = searchPresetRevision
         work {
             // Independent requests can run together. One slow mailbox must not delay tickets,
             // follows or saved lists; failed optional calls retain their previous contents.
             coroutineScope {
-                // A failure in follows must not cancel the independent preferences requests.
-                val userRequest = async { runCatching { api.userState() }.getOrNull() }
+                val userRequest = async { api.userState() }
                 val noticesRequest = async { runCatching { api.notifications() }.getOrNull() }
                 val ticketsRequest = async { runCatching { api.tickets() }.getOrNull() }
                 val groupsRequest = async { runCatching { api.community() }.getOrNull() }
                 val seenRequest = async { runCatching { api.seenBatecs() }.getOrNull() }
-                val creationsRequest = async { runCatching { api.recentBatecEventCreations() }.getOrNull() }
                 val listsRequest = async { runCatching { api.savedLists() }.getOrNull() }
                 val presetsRequest = async { runCatching { api.savedSearches() }.getOrNull() }
                 val bellsRequest = async { runCatching { api.artistBells() }.getOrNull() }
-                val feedPrefsRevisionOnRequest = feedPrefsWriteRevision
-                val feedPrefsRequest = async { runCatching { api.feedPreferences() }.getOrNull() }
-                val placesRevisionOnRequest = placesWriteRevision
-                val placesRequest = async { runCatching { api.locationPreferences() }.getOrNull() }
-                val visibilityRevisionOnRequest = visibilityWriteRevision
-                val visibilityRequest = async { runCatching { api.visibilityExclusions() }.getOrNull() }
                 val newUser = userRequest.await()
-                // A session may be restored after the public catalog was loaded.
-                // Re-fetch the followed Batecs without clearing the existing strip on failure.
-                val newBatecs = newUser?.let { remoteState -> runCatching { api.batecs(remoteState.follows
-                    .filter { it.type.equals("ARTIST", true) }.map { it.label }.toSet()) }.getOrNull() }
                 val newNotices = noticesRequest.await()
                 val newTickets = ticketsRequest.await()
                 val newGroups = groupsRequest.await()
                 val newSeen = seenRequest.await()
-                val newCreations = creationsRequest.await()
                 val newSavedLists = listsRequest.await()
                 val newPresets = presetsRequest.await()
                 val newBells = bellsRequest.await()
-                val newFeedPreferences = feedPrefsRequest.await()
-                val newPlaces = placesRequest.await()
-                val remoteVisibility = visibilityRequest.await()
                 // Never replace the new account's state with an old account's response.
                 if (account?.id == expectedAccount) {
-                    if (newUser != null) {
-                        user = newUser.copy(follows = guestFollowTransfer.preview(expectedAccount, newUser.follows))
-                        applyAccountCategoryFollows(expectedAccount, user.follows)
-                        // Migrate guest follows first, then replay pending account category edits.
-                        scope.launch {
-                            synchronizeGuestFollows(expectedAccount, newUser.follows)
-                            synchronizePendingCategories(expectedAccount)
-                        }
-                    } else {
-                        error = "No s'han pogut recuperar els seguiments del compte. Personalització pendent."
+                    if (followRevisionBeforeRead == followEditRevision) {
+                        user = newUser.copy(saved = if (savedRevisionBeforeRead == savedEditRevision)
+                            newUser.saved else user.saved)
+                        val selectedCategories = IosCategoryTaxonomy.fromServer(newUser.follows)
+                        chosenCategories = selectedCategories.categories
+                        chosenSubcategories = selectedCategories.subcategories
+                    } else if (savedRevisionBeforeRead == savedEditRevision) {
+                        user = user.copy(saved = newUser.saved)
                     }
-                    reconcileFeedPreferences(expectedAccount, feedPrefsRevisionOnRequest, newFeedPreferences)
-                    if (newPlaces == null) {
-                        error = "No s'han pogut recuperar els pobles, comarques i radis del servidor."
-                    }
-                    newBatecs?.let { batecs = it }
                     newNotices?.let { notices = it }
                     newBells?.let { artistBells = it.filter { b -> b.enabled }.associateBy { b -> IosArtistBellPolicy.key(b.artistName) } }
-                    if (remoteVisibility != null && visibilityWriteRevision == visibilityRevisionOnRequest) {
-                        val dirtyKey = iosScopedCacheKey("pref_visibility_dirty",expectedAccount)
-                        if (platformReadPublicCache(dirtyKey) == "true") {
-                            val local = IosVisibilityExclusions(excludedArtists,excludedEventIds,excludedCategories)
-                            val ops = mutableListOf<Triple<String,String,Boolean>>()
-                            fun delta(kind:String,remote:Set<String>,desired:Set<String>) {
-                                (remote - desired).forEach { ops += Triple(kind,it,false) }
-                                (desired - remote).forEach { ops += Triple(kind,it,true) }
-                            }
-                            delta("ARTIST",remoteVisibility.artists,local.artists)
-                            delta("EVENT",remoteVisibility.events.map(Int::toString).toSet(),local.events.map(Int::toString).toSet())
-                            delta("CATEGORY",remoteVisibility.categories,local.categories)
-                            var failures = 0
-                            ops.forEach { (kind,key,hide) ->
-                                runCatching { api.changeVisibility(kind,key,hide) }.onFailure { failures++ }
-                            }
-                            if (account?.id == expectedAccount && visibilityWriteRevision == visibilityRevisionOnRequest && failures == 0)
-                                platformWritePublicCache(dirtyKey,"false")
-                        } else {
-                            excludedArtists = remoteVisibility.artists
-                            excludedEventIds = remoteVisibility.events
-                            excludedCategories = remoteVisibility.categories
-                            platformWritePublicCache(iosScopedCacheKey("hidden_events",expectedAccount),
-                                IosAccountCachePolicy.encode(remoteVisibility.events.map(Int::toString).toSet()))
-                            platformWritePublicCache(iosScopedCacheKey("hidden_artists",expectedAccount),
-                                IosAccountCachePolicy.encode(remoteVisibility.artists))
-                            platformWritePublicCache(iosScopedCacheKey("hidden_categories",expectedAccount),
-                                IosAccountCachePolicy.encode(remoteVisibility.categories))
+                    if (newTickets != null) {
+                        tickets = newTickets; ticketsOffline = false; ticketLoadNotice = ""
+                    } else {
+                        api.offlineTickets()?.let { cached ->
+                            tickets = cached; ticketsOffline = true
+                            ticketLoadNotice = "Còpia sense connexió: consulta l'estat actual en tornar a tindre internet."
                         }
                     }
-                    if (newPlaces != null && placesWriteRevision == placesRevisionOnRequest) {
-                        val dirtyKey = iosScopedCacheKey("pref_places_dirty",expectedAccount)
-                        if (platformReadPublicCache(dirtyKey) == "true") {
-                            val guestPending = iosScopedSet("intro_pending_towns", expectedAccount)
-                            // For onboarding, union the existing account's remote places and the
-                            // locally staged guest places. Do not overwrite a returning user's towns.
-                            val sendRadii = if (guestPending.isNotEmpty()) {
-                                val remote = if (newPlaces.exists) newPlaces.towns else emptyMap()
-                                remote + chosenTowns.associateWith { town ->
-                                    chosenRadii[town] ?: PersonalizationOptions.defaultRadiusKm
-                                }
-                            } else chosenTowns.associateWith {
-                                chosenRadii[it] ?: PersonalizationOptions.defaultRadiusKm
-                            }
-                            val sendComarques = if (guestPending.isNotEmpty() && newPlaces.exists)
-                                newPlaces.comarques + chosenComarques else chosenComarques
-                            if (guestPending.isNotEmpty()) {
-                                chosenTowns = sendRadii.keys
-                                chosenRadii = sendRadii
-                                chosenComarques = sendComarques
-                            }
-                            runCatching { api.saveLocationPreferences(sendRadii, sendComarques) }.onSuccess {
-                                if (account?.id == expectedAccount && placesWriteRevision == placesRevisionOnRequest) {
-                                    platformWritePublicCache(dirtyKey,"false")
-                                    platformWritePublicCache(iosScopedCacheKey("intro_pending_towns", expectedAccount), "~")
-                                    platformWritePublicCache(iosScopedCacheKey("pref_towns", expectedAccount),
-                                        IosAccountCachePolicy.encode(sendRadii.keys))
-                                    platformWritePublicCache(iosScopedCacheKey("pref_radii", expectedAccount),
-                                        IosAccountCachePolicy.encode(IosPersonalFeedPolicy.encodeRadii(sendRadii)))
-                                    platformWritePublicCache(iosScopedCacheKey("pref_comarques", expectedAccount),
-                                        IosAccountCachePolicy.encode(sendComarques))
-                                }
-                            }
-                        } else if (newPlaces.exists) {
-                            chosenTowns = newPlaces.towns.keys
-                            chosenRadii = newPlaces.towns
-                            chosenComarques = newPlaces.comarques
-                            platformWritePublicCache(iosScopedCacheKey("pref_towns",expectedAccount),
-                                IosAccountCachePolicy.encode(chosenTowns))
-                            platformWritePublicCache(iosScopedCacheKey("pref_radii",expectedAccount),
-                                IosAccountCachePolicy.encode(IosPersonalFeedPolicy.encodeRadii(chosenRadii)))
-                            platformWritePublicCache(iosScopedCacheKey("pref_comarques",expectedAccount),
-                                IosAccountCachePolicy.encode(chosenComarques))
-                        }
-                    }
-                    newTickets?.let { tickets = it }
                     newGroups?.let { groups = it }
                     newSeen?.let { seenBatecs = it }
-                    newCreations?.let { batecRecentEventCreations = it }
-                    newSavedLists?.let { savedLists = it }
-                    newPresets?.let { searchPresets = it }
+                    if (listsRevisionBeforeRead == savedListsRevision) newSavedLists?.let { savedLists = it }
+                    if (presetsRevisionBeforeRead == searchPresetRevision)
+                        newPresets?.let { searchPresets = it }
                 }
             }
         }
     }
-    // Both Android and iOS read user-state/mine.php, preferences/locations.php and
-    // preferences/feed.php.  Never present stale local account choices as confirmed.
-    LaunchedEffect(prefOpen, account?.id, prefRefreshEpoch) {
-        val expectedAccount = account?.id
-        if (!prefOpen || expectedAccount == null) return@LaunchedEffect
-        prefSyncPending = true
-        prefSyncError = ""
-        val categoriesRevision = categoryWriteRevision
-        val placesRevision = placesWriteRevision
-        val feedRevision = feedPrefsWriteRevision
-        try {
-            // Each request is independent.  An unavailable optional endpoint must not hide
-            // the successfully loaded categories or followed artists.
-            val remoteUser = runCatching { api.userState() }.getOrNull()
-            val remotePlaces = runCatching { api.locationPreferences() }.getOrNull()
-            val remoteFeed = runCatching { api.feedPreferences() }.getOrNull()
-            if (account?.id != expectedAccount || !prefOpen) return@LaunchedEffect
-            if (remoteUser != null) {
-                user = remoteUser.copy(follows = guestFollowTransfer.preview(expectedAccount,remoteUser.follows))
-                if (categoryWriteRevision == categoriesRevision) {
-                    applyAccountCategoryFollows(expectedAccount,user.follows)
-                }
-                if (platformReadPublicCache(iosScopedCacheKey("pref_categories_dirty",expectedAccount)) == "true") {
-                    synchronizePendingCategories(expectedAccount)
-                }
-            } else prefSyncError = "No s'han pogut llegir les categories i els seguiments del compte."
-            if (remotePlaces != null && remotePlaces.exists && placesRevision == placesWriteRevision &&
-                platformReadPublicCache(iosScopedCacheKey("pref_places_dirty",expectedAccount)) != "true") {
-                chosenTowns = remotePlaces.towns.keys
-                chosenRadii = remotePlaces.towns
-                chosenComarques = remotePlaces.comarques
-                platformWritePublicCache(iosScopedCacheKey("pref_towns",expectedAccount),
-                    IosAccountCachePolicy.encode(chosenTowns))
-                platformWritePublicCache(iosScopedCacheKey("pref_radii",expectedAccount),
-                    IosAccountCachePolicy.encode(IosPersonalFeedPolicy.encodeRadii(chosenRadii)))
-                platformWritePublicCache(iosScopedCacheKey("pref_comarques",expectedAccount),
-                    IosAccountCachePolicy.encode(chosenComarques))
-            } else if (remotePlaces == null) {
-                prefSyncError += " No s'han pogut llegir les ubicacions del servidor."
+    suspend fun reloadMyTickets() {
+        // An offline relaunch cannot call auth/me.php. Show already encrypted QR first,
+        // then try restoring the registered session if the network has returned.
+        if (account == null && api.hasRegisteredSessionToken()) {
+            api.offlineTickets()?.let { cached ->
+                tickets = cached; ticketsOffline = true
+                ticketLoadNotice = "Còpia sense connexió. L'estat necessita confirmació del servidor."
             }
-            if (remoteFeed != null) {
-                reconcileFeedPreferences(expectedAccount,feedRevision,remoteFeed)
-            } else prefSyncError += " No s'han pogut llegir Suggerències, Descoberta i idioma."
-            if (prefSyncError.isBlank()) {
-                // The recomposition after this response uses the same account preferences
-                // that are passed to the shared for-you/feed.php selection.
-                feedPrefsServerRevision += 1
+            val restored = api.restoreAccount()
+            if (restored != null && account == null) {
+                account = restored; useAccountPreferences(restored.id); loadAccountPages()
             }
-        } finally {
-            if (account?.id == expectedAccount) prefSyncPending = false
         }
+        val expectedOwner = account?.id ?: guestReadyUserId ?: api.activePersonalId()
+        val hasSecureOwner = expectedOwner != null || api.hasRegisteredSessionToken()
+        if (!hasSecureOwner) { tickets = emptyList(); ticketsOffline = false; return }
+        val result = if (expectedOwner != null) runCatching { api.tickets() } else null
+        if (expectedOwner != (account?.id ?: guestReadyUserId ?: api.activePersonalId())) return
+        if (result?.isSuccess == true) {
+            tickets = result.getOrThrow()
+            ticketsOffline = false
+            ticketLoadNotice = if (api.offlineTickets() == null)
+                "Entrades carregades del servidor. No s'ha pogut conservar una còpia xifrada per a ús sense connexió."
+                else ""
+        } else {
+            val cached = api.offlineTickets()
+            if (cached != null) {
+                tickets = cached
+                ticketsOffline = true
+                ticketLoadNotice = "Còpia xifrada per a ús sense connexió. L'estat pot haver canviat; no confirma validesa."
+            } else {
+                tickets = emptyList()
+                ticketsOffline = false
+                ticketLoadNotice = "No s'han pogut recuperar entrades. Necessites connexió per descarregar-les una primera vegada."
+            }
+        }
+    }
+    // Step 24: server-only private search presets for guests AND registered accounts.
+    // A stale request cannot import presets from a previous identity.
+    LaunchedEffect(account?.id, guestReadyUserId, searchFiltersOpen) {
+        val expectedOwner = account?.id ?: guestReadyUserId ?: return@LaunchedEffect
+        val before = searchPresetRevision
+        val remote = runCatching { api.savedSearches() }.getOrNull()
+        if (remote != null && (account?.id ?: guestReadyUserId) == expectedOwner &&
+            before == searchPresetRevision) searchPresets = remote
+    }
+    LaunchedEffect(tab, account?.id, guestReadyUserId) {
+        if (tab == "Entrades") reloadMyTickets()
+    }
+    // Pas 6: retry encrypted pending actions while the app is visible and at tab changes.
+    // Never replay one account's actions with another account's token. When acknowledged,
+    // read the server again so Android/iOS present the same canonical information.
+    LaunchedEffect(account?.id, guestReadyUserId, tab) {
+        while (true) {
+            val ownerBefore = account?.id ?: guestReadyUserId
+            if (ownerBefore != null && ownerBefore == api.activePersonalId()) {
+                try {
+                    val replayed = api.flushOfflineActions()
+                    if (replayed > 0 && (account?.id ?: guestReadyUserId) == ownerBefore) {
+                        serverStateRefreshEpoch += 1
+                        status = "Accions pendents sincronitzades amb el servidor"
+                    }
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    throw cancel
+                } catch (_: Exception) {
+                    // Keep the encrypted queue; retry on next foreground/tab or in 60s.
+                }
+            }
+            kotlinx.coroutines.delay(60_000L)
+        }
+    }
+    // Drop an optimistic overlay ONLY when the same user's server state confirms it.
+    LaunchedEffect(serverState?.central?.revision, serverState?.userId) {
+        val snapshot = serverState ?: return@LaunchedEffect
+        val confirmed = festivalSlotOverrides.filter { (key, slots) ->
+            key.first == snapshot.userId && snapshot.personalFestivalSlots(key.second) == slots
+        }.keys
+        if (confirmed.isNotEmpty()) festivalSlotOverrides = festivalSlotOverrides - confirmed
+    }
+    // Guardats is available to guest users too. Refresh canonical saved IDs on entry,
+    // preserving newer local actions until the server confirms them.
+    LaunchedEffect(tab, account?.id, guestReadyUserId) {
+        val owner = account?.id ?: guestReadyUserId
+        if (tab == "Guardats" && owner != null) {
+            val revisionBefore = savedEditRevision
+            val listsBefore = savedListsRevision
+            val fromServer = runCatching { api.userState() }.getOrNull()
+            if (fromServer != null && (account?.id ?: guestReadyUserId) == owner &&
+                revisionBefore == savedEditRevision) {
+                user = user.copy(saved = fromServer.saved)
+            }
+            val remoteLists = runCatching { api.savedLists() }.getOrNull()
+            if (remoteLists != null && (account?.id ?: guestReadyUserId) == owner && listsBefore == savedListsRevision) savedLists = remoteLists
+        }
+    }
+    // Pas 4: server-first hydration for BOTH guest and registered accounts. Never write
+    // the fetched values back to UserDefaults or to the server. A failed read leaves
+    // in-memory/UI values untouched and may be retried after the next session refresh.
+    LaunchedEffect(account?.id, account?.role, guestReadyUserId, serverStateRefreshEpoch) {
+        val expectedId = account?.id ?: guestReadyUserId ?: return@LaunchedEffect
+        val expectedUsername = account?.username
+        val expectedLocationRevision = locationEditRevision
+        val expectedFeedRevision = feedEditRevision
+        val expectedFollowRevision = followEditRevision
+        val expectedSavedRevision = savedEditRevision
+        val expectedVisibilityRevision = visibilityEditRevision
+        val expectedNotificationRevision = notificationSettingsRevision
+        val loaded = runCatching { api.loadServerState() }.getOrNull() ?: return@LaunchedEffect
+        if (loaded.userId != expectedId || (account?.id ?: guestReadyUserId) != expectedId ||
+            account?.username != expectedUsername) return@LaunchedEffect
+        serverState = loaded
+        // Import a saved reading session ONCE for this identity; late GET responses
+        // can never rewind an active scroll or import another account's position.
+        if (readingMemory.importServer(loaded.central.string(IosFeedReadingPolicy.serverKey),
+                expectedId, currentEpochMillis())) readingRestoreEpoch += 1
+        // Dedicated location/feed API values take priority over the Android SharedPrefs
+        // mirror. Project only well-known fields; preserve ALL others inside serverState.
+        val locationWritesPending = runCatching { api.hasPendingLocationWrites(expectedId) }.getOrDefault(true)
+        if (!locationWritesPending && locationEditRevision == expectedLocationRevision) {
+            loaded.towns(expectedUsername)?.let { chosenTowns = it }
+            loaded.comarques(expectedUsername)?.let { chosenComarques = it }
+            loaded.radii(expectedUsername)?.let { chosenRadii = it.filterKeys { name ->
+                loaded.towns(expectedUsername)?.contains(name) == true
+            } }
+        }
+        // Separate feed and UI-language domains, but guard BOTH against pending writes.
+        // A delayed GET must not overwrite edits accepted into the encrypted offline queue.
+        val feedWritesPending = runCatching { api.hasPendingFeedWrites(expectedId) }.getOrDefault(true)
+        if (!feedWritesPending && feedEditRevision == expectedFeedRevision) {
+            loaded.suggestions()?.let { showSuggestions = it }
+            loaded.valencianFirst()?.let { valencianFirst = it }
+            loaded.discovery()?.let { discoveryLevel = it }
+            loaded.uiLanguage()?.let { uiLanguage = it }
+        }
+        if (notificationSettingsRevision == expectedNotificationRevision) {
+            val notifyWritesPending = runCatching { api.hasPendingNotificationSettingsWrites(expectedId) }.getOrDefault(true)
+            if (!notifyWritesPending) {
+                notificationSettings = notificationSettings.withCentral(loaded.central)
+                IosNativeBridge.current?.setPushDeliveryEnabled(notificationSettings.pushEnabled)
+            }
+        }
+        // Pas 11: affinities are returned from user-state/mine.php, not ios_recent_styles_v1.
+        // Pas 7: category/subcategory selection comes only from user_follows, never ios_pref_subcategories_v1.
+        loaded.visibility?.let { remote ->
+            val projected = runCatching { api.reconcilePendingVisibility(remote, expectedId) }.getOrNull()
+            if (projected != null && visibilityEditRevision == expectedVisibilityRevision) {
+                excludedEventIds = projected.events; excludedArtists = projected.artists
+                excludedCategories = projected.categories
+            }
+        }
+        // Follows, saved events and alerts live in dedicated tables and API, not in
+        // sync/state.php. Guests may read them too; account-specific screens read
+        // further domain data independently in loadAccountPages().
+        runCatching {
+            loaded.userDomain?.let { api.reconcilePendingUserState(api.decodeUserState(it), expectedId) }
+                ?: api.userState()
+        }.onSuccess { loadedUser ->
+            if ((account?.id ?: guestReadyUserId) == expectedId && account?.username == expectedUsername) {
+                if (followEditRevision == expectedFollowRevision) {
+                    user = loadedUser.copy(saved = if (savedEditRevision == expectedSavedRevision)
+                        loadedUser.saved else user.saved)
+                    val selection = IosCategoryTaxonomy.fromServer(loadedUser.follows)
+                    chosenCategories = selection.categories // exact Android entity_key
+                    chosenSubcategories = selection.subcategories // exact v336 codes
+                } else if (savedEditRevision == expectedSavedRevision) {
+                    user = user.copy(saved = loadedUser.saved)
+                }
+            }
+        }
+    }
+    LaunchedEffect(Unit) {
+        // Public Android-compatible username resolution; optional and kept only in RAM.
+        organizerAccountKeys = runCatching { api.publicOrganizerAccountKeys() }.getOrDefault(emptyMap())
     }
     LaunchedEffect(Unit) {
         refresh(false)
         val restored = api.restoreAccount()
-        awaitingInitialAccount = restored == null && !api.token.isNullOrBlank()
-        if (restored == null && api.token.isNullOrBlank() && initialGuestOnboardingEligible &&
-            platformReadPublicCache("ios_first_run_state_v350") != "done") {
-            platformWritePublicCache("ios_first_run_state_v350", "offered")
-            firstRunOpen = true
-        }
         if (restored != null) {
-            // A recognised returning user should never see anonymous onboarding after logout.
-            platformWritePublicCache("ios_first_run_state_v350", "done")
-            account = restored
-            stageGuestFollows(restored.id)
-            stageGuestFirstRunPlaces(restored.id)
-            user = user.copy(follows = guestFollowTransfer.preview(restored.id, emptyList()))
-            useAccountPreferences(restored.id); loadAccountPages()
+            account = restored; useAccountPreferences(restored.id); loadAccountPages()
             myProfile = runCatching { api.myPublicProfile() }.getOrNull()
-        }
-    }
-    LaunchedEffect(tab, account?.id) {
-        if (tab == "Comunitat" && account == null) {
-            runCatching { api.publicCommunityGroups() }
-                .onSuccess { if (account == null) groups = it }
-                .onFailure { if (account == null) status = "No s'han pogut carregar els taulons públics" }
-        }
-    }
-    LaunchedEffect(tab, account?.id) {
-        if (tab == "Perfil" && account != null) {
-            val expectedId = account?.id
-            val currentSettings = runCatching { api.profileSettings() }.getOrNull()
-            if (account?.id == expectedId) profileSettings = currentSettings
-            val currentProfile = runCatching { api.myPublicProfile() }.getOrNull()
-            if (account?.id == expectedId && currentProfile != null) myProfile = currentProfile
-        }
-    }
-    // Batecs have a 48-hour freshness window, and new event publications arrive
-    // independently of the 30-minute catalog cache. Refresh invisibly while at Inici.
-    LaunchedEffect(tab, account?.id) {
-        val expectedId = account?.id
-        if (tab == "Inici" && expectedId != null) {
+        } else if (!api.hasRegisteredSessionToken()) {
+            // Android v336 registers every guest in MariaDB. Retry in case the first launch
+            // is offline; never replace a registered token during a temporary API outage.
             while (true) {
-                kotlinx.coroutines.delay(120_000L)
-                val nextPublications = runCatching { api.batecs(user.follows
-                    .filter { it.type.equals("ARTIST", true) }.map { it.label }.toSet()) }.getOrNull()
-                val nextCreationTimes = runCatching { api.recentBatecEventCreations() }.getOrNull()
-                val nextSeen = runCatching { api.seenBatecs() }.getOrNull()
-                if (account?.id != expectedId) break
-                nextPublications?.let { batecs = it }
-                nextCreationTimes?.let { batecRecentEventCreations = it }
-                nextSeen?.let { seenBatecs = it }
-                batecClockTick = currentEpochMillis()
+                val createdId = runCatching { api.ensureGuestIdentity() }.getOrNull()
+                if (createdId != null) { guestReadyUserId = createdId; break }
+                kotlinx.coroutines.delay(60_000L)
             }
+        }
+    }
+    // Pas 3: reclaim guest data after EVERY successful authentication, including
+    // restored sessions. A failed merge never discards the guest token: retry later.
+    // Guest personal state is fetched from the server again after a confirmed merge.
+    LaunchedEffect(account?.id) {
+        val expectedUserId = account?.id ?: return@LaunchedEffect
+        while (api.hasPendingGuestClaim() && account?.id == expectedUserId) {
+            val outcome = runCatching { api.claimPendingGuestIdentity(expectedUserId) }
+            if (outcome.isSuccess && outcome.getOrDefault(false)) {
+                if (account?.id == expectedUserId) {
+                    status = "Dades de convidat vinculades al compte"
+                    loadAccountPages()
+                    serverStateRefreshEpoch += 1 // read merged state after server claim
+                }
+                break
+            }
+            if (outcome.isFailure && account?.id == expectedUserId) {
+                status = "Fusió de convidat pendent: es reintentarà en recuperar connexió."
+            }
+            kotlinx.coroutines.delay(60_000L)
         }
     }
     // Campaigns expire or begin independently of the 30-minute personal feed cache.
@@ -823,36 +653,20 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             }
         }
     }
-    var today by remember { mutableStateOf(currentLocalDateIso()) }
-    // If the app stays open at midnight, expire events and update saved-day labels.
-    LaunchedEffect(Unit) {
-        while (true) {
-            kotlinx.coroutines.delay(60_000L)
-            val newDate = currentLocalDateIso()
-            if (newDate != today) today = newDate
-        }
-    }
-    // Both an APNs event alert and a scheduled local reminder may arrive before
-    // the public catalog finishes loading. Open once the real event is available.
-    LaunchedEffect(pendingOpenEventId, events) {
-        val eventId = pendingOpenEventId
-        if (eventId > 0) {
-            val match = events.firstOrNull { it.id == eventId }
-            if (match != null) {
-                tab = "Inici"
-                selected = match
-                festivalMatchedArtist = ""
-                pendingOpenEventId = 0
-            }
-        }
-    }
+    val today = currentLocalDateIso() // Re-evaluate local calendar date on recomposition (midnight/foreground).
     val available = remember(events, paid, today) {
         // The commercial feed is not allowed to lose paid campaigns or internal ticket sales
         // just because the global catalog is stale or incomplete.
         (events + paid.priorityEvents).distinctBy { it.key }
-            .filter { it.endDate.ifBlank { it.date }.isBlank() || it.endDate.ifBlank { it.date } >= today }
+            .filter { IosUnfilteredAgenda.hasFutureDate(it, today) }
             .sortedWith(compareBy<AgendaEventSummary> { it.date.ifBlank { "9999" } }.thenBy { it.time }.thenBy { it.id })
     }
+    // Guardats must not inherit the feed's date filter or occurrence projections:
+    // Android checks the final real day at 05:00 (including festival programme).
+    val savedCatalog = remember(events, paid.priorityEvents) {
+        (events + paid.priorityEvents).distinctBy { it.id }
+    }
+    val savedCulturalToday = currentAgendaDateIso()
     val eventById = remember(available) { available.associateBy { it.id } }
     LaunchedEffect(paid.ads, today, tab) {
         if (tab != "Inici" || selected != null) return@LaunchedEffect
@@ -865,36 +679,56 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             }
         }
     }
-    // Android does not depend on six manually published server Batecs:
-    // it synthesizes recent event news and, as a fallback, grey followed-artist circles.
-    val activeBatecs = remember(batecs, user.follows, available, batecRecentEventCreations,
-        today, excludedArtists, account?.id, batecClockTick) {
-        IosBatecsFeed.assemble(
-            server = batecs, follows = user.follows, catalog = available,
-            recentEventCreations = batecRecentEventCreations,
-            nowMillis = batecClockTick, todayIso = today,
-            excludedArtists = excludedArtists
-        )
+    // The Android carousel contains ONE circle per followed artist. Multiple server
+    // publications share that circle; viewed status is grey only when ALL are seen.
+    // Pas 19: single server-backed Batecs refresh, including newly followed artists.
+    // A stale response may never cross a guest/registered account boundary.
+    LaunchedEffect(events, user.follows, excludedArtists, account?.id, guestReadyUserId, batecsRefreshEpoch) {
+        val owner = account?.id ?: guestReadyUserId
+        val follows = user.follows.filter { it.type.equals("ARTIST", true) }
+            .map { it.label.ifBlank { it.key } }.filter(String::isNotBlank).toSet()
+        val eligible = follows.map(IosBatecFeedContract::norm).toSet() -
+            excludedArtists.map(IosBatecFeedContract::norm).toSet()
+        if (owner == null || eligible.size <= 6) { batecs = emptyList(); return@LaunchedEffect }
+        val next = runCatching { api.batecs(follows, events, excludedArtists) }.getOrNull()
+        if (next != null && (account?.id ?: guestReadyUserId) == owner) batecs = next
     }
-    val followedGroups = remember(activeBatecs, user.follows, seenBatecs,
-        excludedArtists, account?.id, batecClockTick) {
-        val remaining = user.follows.filter { it.type.equals("ARTIST", true) &&
-            IosBatecTimelinePolicy.normal(it.label) !in excludedArtists.map(IosBatecTimelinePolicy::normal) }
+    val followedGroups = remember(batecs, user.follows, seenBatecs, excludedArtists) {
         IosBatecArtistGroups.select(
-            activeBatecs.map { BatecCandidate(it.storyKey, it.artist, it.publishedAtMillis,
-                it.sourceType == "FOLLOWED_PLACEHOLDER") },
-            remaining.map { it.label.ifBlank { it.key } }.toSet(), seenBatecs,
-            nowMillis = batecClockTick
+            batecs.map { BatecCandidate(it.storyKey, it.artist, it.sourceType, it.publishedAt) },
+            user.follows.filter { it.type.equals("ARTIST", true) }
+                .map { it.label.ifBlank { it.key } }.filter { label ->
+                    excludedArtists.none { IosBatecFeedContract.norm(it) == IosBatecFeedContract.norm(label) }
+                }.toSet(),
+            seenBatecs
         )
     }
     val batecRowState = rememberLazyListState()
+    val batecStripOrder = remember(followedGroups) { followedGroups.map { it.key } }
+    var keepBatecStripAtStart by remember { mutableStateOf(false) }
     LaunchedEffect(batecsReturnEpoch) {
-        if (batecsReturnEpoch > 0) batecRowState.scrollToItem(0)
+        if (batecsReturnEpoch > 0) {
+            keepBatecStripAtStart = true
+            batecRowState.scrollToItem(0)
+        }
+    }
+    LaunchedEffect(batecStripOrder) {
+        if (keepBatecStripAtStart) batecRowState.scrollToItem(0)
+    }
+    fun openBatecs(key: String) {
+        val owner = account?.id ?: guestReadyUserId
+        if (owner != null && followedGroups.any { it.key == key }) {
+            batecViewerGroups = followedGroups.toList()
+            batecViewerStories = batecs.toList()
+            batecViewerOwnerId = owner
+            batecStoryKey = key
+        }
     }
     // Build the suggestion index off the UI thread only when the catalog changes.
     val searchPool by produceState<List<IosSearchSuggestion>>(initialValue = emptyList(), available) {
         value = withContext(Dispatchers.Default) {
-            IosAdvancedSearch.pool(available, IosGeoPlaces.allTowns(), IosGeoPlaces.allComarques())
+            IosAdvancedSearch.pool(available, IosGeoPlaces.allTowns(), IosGeoPlaces.allComarques(),
+                IosGeoPlaces.municipalityEntries())
         }
     }
     val suggestions by produceState<List<IosSearchSuggestion>>(initialValue = emptyList(), suggestionDraft, searchPool, chosenSuggestion) {
@@ -902,49 +736,73 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             if (chosenSuggestion != null) emptyList() else IosAdvancedSearch.suggest(searchPool, suggestionDraft)
         }
     }
-    // Android: changing a feed tab abandons the active query, criteria and named list.
-    fun chooseFeedMode(mode: String, category: String? = null) {
-        // A deliberate mode change starts a new reading view.
-        IosFeedReadingSession.clear()
-        feedMode = mode
-        selectedFeedCategory = if (mode == "Categoria") category else null
-        activeFilterPresetName = null
-        query = ""; appliedQuery = ""; suggestionDraft = ""
-        chosenSuggestion = null; appliedSuggestion = null
-        appliedSearchFilters = IosSearchFilters()
-        limit = 5
+    // Step 23: bounded off-main suggestions for the "On?" location filters.
+    // Typing does not apply a search or recalculate the event feed.
+    var territoryTownDraft by remember { mutableStateOf("") }
+    var territoryComarcaDraft by remember { mutableStateOf("") }
+    var territoryTownChosen by remember { mutableStateOf(false) }
+    var territoryComarcaChosen by remember { mutableStateOf(false) }
+    val territoryTownPool = remember(searchPool) { searchPool.filter { it.type == IosSearchType.TOWN } }
+    val territoryComarcaPool = remember(searchPool) { searchPool.filter { it.type == IosSearchType.COMARCA } }
+    LaunchedEffect(searchTown, searchFiltersOpen) {
+        kotlinx.coroutines.delay(220)
+        territoryTownDraft = if (searchFiltersOpen && !territoryTownChosen) searchTown else ""
     }
-    fun applyNamedPreset(preset: IosSavedSearch): Boolean {
-        val criteria = preset.filters.copy(referenceTowns = chosenTowns)
-        if (!criteria.isActive || !criteria.valid()) {
-            status = "Revisa el poble d'origen per a aplicar el radi d'esta llista."
-            return false
+    LaunchedEffect(searchComarca, searchFiltersOpen) {
+        kotlinx.coroutines.delay(220)
+        territoryComarcaDraft = if (searchFiltersOpen && !territoryComarcaChosen) searchComarca else ""
+    }
+    val townSuggestions by produceState(initialValue = emptyList<IosSearchSuggestion>(), territoryTownDraft, searchPool) {
+        value = withContext(Dispatchers.Default) {
+            IosAdvancedSearch.suggest(territoryTownPool, territoryTownDraft, 8)
         }
-        chooseFeedMode("Sense filtre")
-        appliedSearchFilters = criteria
-        activeFilterPresetName = preset.name
-        limit = 5
-        return true
+    }
+    val comarcaSuggestions by produceState(initialValue = emptyList<IosSearchSuggestion>(), territoryComarcaDraft, searchPool) {
+        value = withContext(Dispatchers.Default) {
+            IosAdvancedSearch.suggest(territoryComarcaPool, territoryComarcaDraft, 6)
+        }
+    }
+    // Step 22: a committed full artist name has the same meaning as an ARTIST
+    // suggestion, even when the keyboard Search button was used directly.
+    val searchedArtist = remember(appliedQuery, appliedSuggestion, searchPool) {
+        IosFestivalArtistSearch.resolveArtist(appliedQuery, appliedSuggestion, searchPool)
+    }
+    val effectiveSearchSuggestion = remember(appliedQuery, appliedSuggestion, searchedArtist) {
+        if (searchedArtist != null) IosSearchSuggestion(IosSearchType.ARTIST, searchedArtist)
+        else appliedSuggestion
+    }
+    // Detailed schedules only for festivals that already match the published
+    // catalog artist/lineup. No speculative queries for all events on typing.
+    val artistFestivalSchedule by produceState<Map<Int, List<AgendaScheduleEntry>>>(
+        initialValue = emptyMap(), available, searchedArtist) {
+        value = emptyMap()
+        if (searchedArtist != null) {
+            val candidates = available.asSequence()
+                .filter { it.isFestival && IosFestivalArtistSearch.isInLineup(it, searchedArtist) }
+                .map { it.id }.distinct().take(80).toList()
+            val verified = mutableMapOf<Int, List<AgendaScheduleEntry>>()
+            for (id in candidates) {
+                val details = try { api.festivalSchedule(id) }
+                catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
+                catch (_: Exception) { null }
+                if (details != null) {
+                    verified[id] = details
+                    // Publish incrementally: the search doesn't need to wait
+                    // for every festival's remote schedule to appear.
+                    value = verified.toMap()
+                }
+            }
+        }
     }
     val categoriesForSearch = remember(available) { available.map { it.category }.filter(String::isNotBlank).distinct().sorted() }
     val stylesForSearch = remember(available) { available.flatMap { it.styles.flatMap { s -> s.split('|',',',';') } }.map(String::trim).filter(String::isNotBlank).distinct().sorted() }
-    val effectiveSearchFilters = remember(appliedSearchFilters, chosenTowns) {
-        appliedSearchFilters.copy(referenceTowns = chosenTowns)
-    }
-    val searchInProgress = appliedQuery.isNotBlank() || effectiveSearchFilters.isActive
-    // Android resolves an exact artist name even when the person presses Search
-    // without tapping a suggestion: return that artist's concerts/festivals exclusively.
-    val effectiveSearchSuggestion = remember(appliedQuery,appliedSuggestion,searchPool) {
-        appliedSuggestion ?: searchPool.firstOrNull { suggestion ->
-            suggestion.type == IosSearchType.ARTIST &&
-                IosEventPopupPolicy.artistKey(suggestion.value) == IosEventPopupPolicy.artistKey(appliedQuery) &&
-                appliedQuery.isNotBlank()
-        }
-    }
+    val searchInProgress = appliedQuery.isNotBlank() || appliedSearchFilters.isActive
     // Strict global search: never restrict results to the previous personalized snapshot.
-    val computedFiltered by produceState<List<AgendaEventSummary>>(initialValue = emptyList(), available, appliedQuery, effectiveSearchSuggestion, effectiveSearchFilters) {
+    val computedFiltered by produceState<List<AgendaEventSummary>>(initialValue = emptyList(), available, appliedQuery, searchedArtist,
+        effectiveSearchSuggestion, appliedSearchFilters) {
         value = withContext(Dispatchers.Default) {
-            available.filter { IosAdvancedSearch.matches(it, appliedQuery, effectiveSearchSuggestion, effectiveSearchFilters) }
+            available.filter { IosAdvancedSearch.matches(
+                it, searchedArtist ?: appliedQuery, effectiveSearchSuggestion, appliedSearchFilters) }
         }
     }
     // Unfiltered renders the catalog immediately, without waiting for an unnecessary re-filter.
@@ -952,272 +810,331 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     // The potentially costly affinity calculation never runs in the Compose render pass.
     // Only follows (not saved/alerts) and explicit tastes invalidate it; typing does not.
     // Keep the last valid selection visible during an update, but never show another account's.
+    val personalizationOwnerId = account?.id ?: guestReadyUserId
     val selectedForYou by produceState<Pair<Int?, List<AgendaEventSummary>>>(
-        initialValue = null to emptyList(), available, account?.id, user.follows,
-        chosenCategories, chosenTowns, chosenSubcategories, chosenComarques, chosenRadii,
-        showSuggestions, discoveryLevel, valencianFirst, paid, entityStyles, learningResetRevision, feedPrefsServerRevision
+        initialValue = null to emptyList(), available, personalizationOwnerId, user.follows,
+        user.affinities, chosenCategories, chosenTowns, chosenSubcategories, chosenComarques, chosenRadii,
+        showSuggestions, discoveryLevel, valencianFirst, paid, entityStyles,
+        serverState?.central?.revision, serverStateRefreshEpoch, excludedEventIds,
+        excludedArtists, excludedCategories, feedMode, searchInProgress
     ) {
-        val owner = account?.id
-        // Never independently select events when the shared server endpoint is working.
-        // Only recover the historical offline snapshot if the server is unavailable.
-        val serverIds = runCatching {
-            api.serverForYouIds(chosenCategories, chosenSubcategories, chosenTowns,
-                chosenComarques, chosenRadii, showSuggestions, discoveryLevel.name,
-                valencianFirst, user.follows)
-        }.getOrNull()
-        val result = if (serverIds != null) {
-            withContext(Dispatchers.Default) {
-                val lookup = available.groupBy { it.id }
-                serverIds.flatMap { lookup[it].orEmpty() }.distinctBy { it.key }
+        val owner = personalizationOwnerId
+        // Never show a different identity's cached personalized events.
+        if (owner == null || feedMode != "Per a tu" || searchInProgress) {
+            value = owner to emptyList()
+        } else {
+            val prefs = IosForYouServerOrder.payload(chosenCategories, chosenSubcategories,
+                chosenTowns, chosenComarques, chosenRadii, showSuggestions, discoveryLevel, valencianFirst)
+            val hasPendingPersonalWrites = try {
+                api.hasPendingPersonalWrites(owner)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: Exception) { true }
+            val androidSignature = if (serverState?.userId == owner && !hasPendingPersonalWrites) {
+                IosForYouServerOrder.androidSignature(serverState, account?.username)
+            } else null
+            val selected = try {
+                val serverIds = api.forYouServerSelection(owner, androidSignature, today, prefs)
+                IosForYouServerOrder.select(serverIds.ids, available)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                // Offline/older server: preserve access with a 30-min RAM-only fallback.
+                // This is NOT labelled as Android's definitive ordered snapshot.
+                withContext(Dispatchers.Default) {
+                    IosForYouSnapshot.select(available, owner, user, chosenCategories, chosenTowns, paid,
+                        chosenSubcategories, chosenComarques, chosenRadii, showSuggestions,
+                        discoveryLevel, valencianFirst, entityStyles)
+                }
             }
-        } else withContext(Dispatchers.Default) {
-            IosForYouSnapshot.select(available, owner, user, chosenCategories, chosenTowns, paid,
-                chosenSubcategories, chosenComarques, chosenRadii, showSuggestions,
-                discoveryLevel, valencianFirst, entityStyles)
+            if ((account?.id ?: guestReadyUserId) == owner) value = owner to selected
         }
-        value = owner to result
     }
-    val forYou = if (selectedForYou.first == account?.id) selectedForYou.second else emptyList()
+    val forYou = if (selectedForYou.first == personalizationOwnerId) selectedForYou.second else emptyList()
     // Commercially guaranteed events retain priority even during searching. No duplicate cards.
-    val activeFeed = remember(forYou, filtered, available, paid, feedMode, selectedFeedCategory,
-        user.follows, searchInProgress, valencianFirst, today, effectiveSearchSuggestion,
-        chosenCategories, chosenTowns) {
-        // Commercial commitments remain global; organic results follow the chosen Android tab.
+    val activeFeed = remember(forYou, filtered, available, paid, feedMode, searchInProgress,
+        searchedArtist, artistFestivalSchedule,
+        valencianFirst, today, user.follows, chosenCategories, chosenSubcategories, chosenTowns, chosenComarques) {
+        // Active paid placements and internal ticket-sale cards are independent of
+        // personal preferences and searches, including when the search has zero hits.
+        // This is the project's explicit permanent commercial-visibility rule.
         val commercialIds = paid.guaranteedEventIds + paid.ads.map { it.eventId }
-        val guaranteed = available.filter { it.id in commercialIds || it.ticketAvailable }
+        val guaranteed = IosCommercialVisibility.guaranteed(available, commercialIds)
         val organic = when {
-            searchInProgress -> filtered // A manual search is always over the whole catalog.
-            feedMode == "Sense filtre" -> available
-            feedMode == "Seguits" -> IosFeedModePolicy.followed(available, user.follows, today)
-            feedMode == "Categoria" -> IosFeedModePolicy.category(available, selectedFeedCategory, today)
-            account == null && forYou.isEmpty() &&
-                chosenCategories.isEmpty() && chosenTowns.isEmpty() -> available
+            searchInProgress || feedMode == "Sense filtre" -> filtered
+            forYou.isEmpty() &&
+                !com.example.agendavalenciana.model.DefaultFeedPolicy.hasExplicitSignals(
+                    user.follows.filter { it.type == "ARTIST" }.map { it.key }.toSet(),
+                    user.follows.filter { it.type == "ORGANIZER" }.map { it.key }.toSet(),
+                    user.follows.filter { it.type == "VENUE" }.map { it.key }.toSet(),
+                    user.follows.filter { it.type == "CATEGORY" }.map { it.key }.toSet() + chosenCategories + chosenSubcategories,
+                    chosenTowns, chosenComarques) -> available
             else -> forYou
         }
         if (!searchInProgress && feedMode == "Sense filtre") {
-            available.sortedWith(compareBy<AgendaEventSummary> {
-                IosUnfilteredFeedPolicy.relevantDate(it.date, it.endDate, today,
-                    if (it.isFestival) it.schedule.map { slot -> slot.date } else emptyList())
-            }.thenBy { it.time }.thenBy { it.id })
-        } else (guaranteed + organic).distinctBy {
-            if (searchInProgress && effectiveSearchSuggestion?.type == IosSearchType.ARTIST && it.isFestival)
-                "festival_${it.id}" else it.key
-        }.sortedWith(compareBy<AgendaEventSummary> {
-            IosUnfilteredFeedPolicy.relevantDate(it.date, it.endDate, today,
-                if (it.isFestival) it.schedule.map { slot -> slot.date } else emptyList())
-        }.thenByDescending { feedMode == "Per a tu" && valencianFirst &&
-            (IosGeoPlaces.key(it.language).contains("valencia") ||
-             IosGeoPlaces.key(it.language).contains("catala") || it.language.equals("ca",true)) }
-            .thenBy { it.time }.thenBy { it.id })
+            // Use the shared full catalog without first concatenating paid subsets (no duplicates).
+            // An ongoing festival is dated by its next relevant day, without mutating its original ID.
+            IosUnfilteredAgenda.select(available, today,
+                paid.guaranteedEventIds + paid.ads.map { it.eventId })
+        } else {
+            val organicRows = if (searchInProgress && searchedArtist != null)
+                IosFestivalArtistSearch.searchRows(organic, searchedArtist, artistFestivalSchedule)
+            else organic
+            val promotedRows = if (searchInProgress && searchedArtist != null)
+                IosFestivalArtistSearch.searchRows(guaranteed, searchedArtist, artistFestivalSchedule)
+            else guaranteed
+            (promotedRows + organicRows).distinctBy {
+                // One original festival ID in artist searches, even when its paid
+                // card and artist-day projection have different display dates.
+                if (searchInProgress && searchedArtist != null && it.isFestival) "festival:${it.id}" else it.key
+            }.sortedWith(compareBy<AgendaEventSummary> { it.displayDate.ifBlank { "9999" } }
+                .thenByDescending { feedMode == "Per a tu" && valencianFirst &&
+                    (IosGeoPlaces.key(it.language).contains("valencia") ||
+                     IosGeoPlaces.key(it.language).contains("catala") || it.language.equals("ca",true)) }
+                .thenBy { it.time }.thenBy { it.id })
+        }
     }
     // Exclusions do not invalidate the 30-minute ordered snapshot; they are applied
     // only to the organic display list. Commercial commitments always override hiding.
     val personalizedFeed = remember(activeFeed, excludedEventIds, excludedArtists, excludedCategories, paid) {
         val protectedIds = paid.guaranteedEventIds + paid.ads.map { it.eventId }
         activeFeed.filter { ev ->
-            // Android: a blocked solo artist does not hide a multi-artist festival.
-            val performers = (ev.artists + ev.schedule.map { it.artist }).filter(String::isNotBlank).distinct()
-            val blockedByCanonicalCategory = IosPersonalizationTaxonomy.categoryForEvent(ev.category)
-                ?.let { it in excludedCategories } ?: false
-            val blockedBySubcategory = excludedCategories.any { hidden ->
-                IosPersonalizationTaxonomy.matchesSubcategory(hidden,ev.category,ev.styles)
-            }
-            ((ev.id in protectedIds || ev.ticketAvailable) || (!blockedByCanonicalCategory && !blockedBySubcategory)) &&
-                IosFeedExclusionPolicy.visible(
-                ev.id, if (ev.isFestival && performers.size > 1) emptyList() else performers, ev.category,
+            IosFeedExclusionPolicy.visible(ev.id, ev.artists + ev.schedule.map { it.artist }, ev.category,
                 excludedEventIds, excludedArtists, excludedCategories,
-                commerciallyGuaranteed = ev.id in protectedIds || ev.ticketAvailable)
+                commerciallyGuaranteed = IosCommercialVisibility.protected(ev, protectedIds), styles = ev.styles)
         }
+    }
+    val readingOwner = account?.id ?: guestReadyUserId
+    val readingViewKey = "v14|${readingOwner ?: 0}|${feedMode}|${appliedQuery}|" +
+        "${appliedSuggestion?.value.orEmpty()}|${appliedSearchFilters.hashCode()}"
+    // Never reset the visible batch after a routine network refresh or returning
+    // to Inici. A new explicit mode/search/view starts with the first five cards.
+    var appliedReadingView by remember { mutableStateOf("") }
+    LaunchedEffect(readingViewKey, readingRestoreEpoch, readingOwner, personalizedFeed.size) {
+        if (appliedReadingView != readingViewKey) {
+            limit = IosFeedReadingPolicy.initial
+            appliedReadingView = readingViewKey
+        }
+        val resumed = readingOwner?.let { readingMemory.restore(it, readingViewKey, currentEpochMillis()) }
+        if (resumed != null) {
+            limit = maxOf(limit, IosFeedReadingPolicy.restoredLimit(resumed, personalizedFeed.size))
+        } else if (limit <= 0) {
+            limit = IosFeedReadingPolicy.restoredLimit(null, personalizedFeed.size)
+        }
+    }
+    // Debounce writes to sync/state.php. The encrypted offline queue handles failures;
+    // no persistent local user-state store is created by this screen.
+    LaunchedEffect(readingPersistEpoch, readingOwner) {
+        if (readingPersistEpoch == 0) return@LaunchedEffect
+        kotlinx.coroutines.delay(2_000L)
+        val snapshot = readingMemory.snapshot() ?: return@LaunchedEffect
+        if (snapshot.ownerId != readingOwner || api.activePersonalId() != snapshot.ownerId) return@LaunchedEffect
+        try {
+            api.savePersonalState(snapshot.ownerId, mapOf(
+                IosFeedReadingPolicy.serverKey to IosPersonalEncoded.string(snapshot.encode())
+            ))
+        } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
+        catch (_: Exception) { /* The RAM snapshot stays; step 6 handles retryable writes. */ }
     }
     val visibleFeed = remember(personalizedFeed, limit) { personalizedFeed.take(limit) }
 
-    fun showEvent(event: AgendaEventSummary, q: String = "", explicitArtistFocus: Boolean = false) {
-        // A visit contributes to optional discovery on its next snapshot refresh,
-        // never forces a new feed calculation while navigating the current one.
-        IosRecentInterest.recordOpen(account?.id,event)
+    fun recordSearchOnServer(term: String) {
+        if (term.trim().length < 3) return
+        work {
+            try { api.recordSearchAffinity(term) }
+            catch (_: IosQueuedForRetryException) { /* Encrypted action will replay later. */ }
+        }
+    }
+    fun showEvent(event: AgendaEventSummary, q: String = "") {
+        work {
+            try { api.recordOpenAffinity(event) }
+            catch (_: IosQueuedForRetryException) { /* Offline queue owns this signal. */ }
+        }
         selected = event
-        // A saved/notified event must not inherit an unrelated old feed search.
-        val focusedSearch = q.trim()
-        val kind = effectiveSearchSuggestion?.takeIf { suggestion ->
-            focusedSearch.isNotBlank() &&
-                IosEventPopupPolicy.artistKey(suggestion.value) == IosEventPopupPolicy.artistKey(focusedSearch)
-        }?.type
-        festivalMatchedArtist = if (explicitArtistFocus && event.isFestival) focusedSearch
-            else IosEventPopupPolicy.requestedArtist(event, focusedSearch, kind)
+        festivalMatchedArtist = if (event.isFestival && q.isNotBlank() &&
+            (IosFestivalArtistSearch.isInLineup(event, q) ||
+                artistFestivalSchedule[event.id].orEmpty().any { IosFestivalArtistSearch.matchesArtist(it, q) })) q else ""
+    }
+    fun saveExclusions(events: Set<Int>, artists: Set<String>, categories: Set<String>) {
+        val expectedId = account?.id ?: guestReadyUserId
+        if (expectedId == null) { error = "Cal establir la identitat del servidor"; return }
+        val previous = IosVisibilitySnapshot(excludedEventIds, excludedArtists, excludedCategories)
+        val desired = IosVisibilitySnapshot(events, artists, categories)
+        visibilityEditRevision += 1
+        work {
+            var delayed = api.updateVisibility(expectedId, previous, desired)
+            // Android v336 never follows and blocks the same artist/category at once.
+            val newlyBlockedArtists = desired.artists - previous.artists
+            val newlyBlockedCategories = desired.categories - previous.categories
+            val conflictingFollows = user.follows.filter { follow ->
+                when (follow.type.uppercase()) {
+                    "ARTIST" -> newlyBlockedArtists.any { IosFollowMutation.canonicalKey(it) ==
+                        IosFollowMutation.canonicalKey(follow.key) }
+                    "CATEGORY" -> newlyBlockedCategories.any { blocked ->
+                        val main = IosCategoryTaxonomy.mainKey(blocked)
+                        val keyMain = IosCategoryTaxonomy.mainKey(follow.key)
+                        val childCode = IosCategoryTaxonomy.subcategoryCode(follow.key)
+                        (main != null && (main == keyMain || (childCode != null &&
+                            IosCategoryTaxonomy.childrenOf(main).any { it.code == childCode }))) ||
+                            (IosCategoryTaxonomy.subcategoryCode(blocked) != null &&
+                             IosCategoryTaxonomy.subcategoryCode(blocked) == childCode)
+                    }
+                    else -> false
+                }
+            }
+            for (follow in conflictingFollows) {
+                try { api.followEntity(follow.type.uppercase(), follow.key, follow.label.ifBlank { follow.key }, false) }
+                catch (_: IosQueuedForRetryException) { delayed = true }
+            }
+            if ((account?.id ?: guestReadyUserId) == expectedId) {
+                val verified = runCatching { api.visibility() }.getOrNull()
+                // Offline: the encrypted queue was durably written; show its expected projection.
+                val displayed = verified ?: desired
+                excludedEventIds = displayed.events; excludedArtists = displayed.artists
+                excludedCategories = displayed.categories
+                serverStateRefreshEpoch += 1
+                status = if (delayed || verified == null) "Exclusions pendents de sincronització"
+                    else "Exclusions guardades al servidor"
+            }
+        }
     }
     fun excludeFromFeed(event: AgendaEventSummary, mode: String) {
         when (mode) {
-            "EVENT" -> {
-                excludedEventIds = excludedEventIds + event.id
-                platformWritePublicCache(iosScopedCacheKey("hidden_events", account?.id),
-                    IosAccountCachePolicy.encode(excludedEventIds.map(Int::toString).toSet()))
-                status = "Esdeveniment ocultat del feed"
-            }
+            "EVENT" -> saveExclusions(excludedEventIds + event.id, excludedArtists, excludedCategories)
             "ARTIST" -> {
                 val firstArtist = event.artists.firstOrNull { it.isNotBlank() }
                     ?: event.schedule.firstOrNull { it.artist.isNotBlank() }?.artist ?: return
-                excludedArtists = excludedArtists + firstArtist
-                platformWritePublicCache(iosScopedCacheKey("hidden_artists", account?.id),
-                    IosAccountCachePolicy.encode(excludedArtists))
-                status = "Artista ocultat del feed"
+                saveExclusions(excludedEventIds, excludedArtists + firstArtist, excludedCategories)
             }
             "CATEGORY" -> {
-                if (event.category.isBlank()) return
-                excludedCategories = excludedCategories + event.category
-                platformWritePublicCache(iosScopedCacheKey("hidden_categories", account?.id),
-                    IosAccountCachePolicy.encode(excludedCategories))
-                status = "Categoria ocultada del feed"
+                val code = IosCategoryTaxonomy.mainKey(event.category) ?: return
+                saveExclusions(excludedEventIds, excludedArtists, excludedCategories + code)
             }
         }
     }
-    fun saveExclusions(events: Set<Int>, artists: Set<String>, categories: Set<String>) {
-        excludedEventIds = events; excludedArtists = artists; excludedCategories = categories
-        platformWritePublicCache(iosScopedCacheKey("hidden_events", account?.id), IosAccountCachePolicy.encode(events.map(Int::toString).toSet()))
-        platformWritePublicCache(iosScopedCacheKey("hidden_artists", account?.id), IosAccountCachePolicy.encode(artists))
-        platformWritePublicCache(iosScopedCacheKey("hidden_categories", account?.id), IosAccountCachePolicy.encode(categories))
-    }
     fun toggleSaved(event: AgendaEventSummary) {
-        val next = event.id !in user.saved
-        if (account == null) {
-            val updated = if (next) user.saved + event.id else user.saved - event.id
-            platformWritePublicCache(iosScopedCacheKey("saved_events", null),
-                IosAccountCachePolicy.encode(updated.map(Int::toString).toSet()))
-            user = user.copy(saved = updated)
-            status = if (next) "Esdeveniment guardat en este iPhone" else "Esdeveniment llevat de Guardats"
-            return
-        }
-        val expectedId = account?.id ?: return
+        // The guest is a real MariaDB user. No login prompt is required.
+        if (event.id <= 0 || event.id in savingEventIds) return
+        val requestedOwner = account?.id ?: guestReadyUserId
+        savingEventIds = savingEventIds + event.id
         work {
-            api.saveEvent(event, next)
-            if (account?.id != expectedId) return@work
-            user = user.copy(saved = if (next) user.saved + event.id else user.saved - event.id)
-            status = if (next) "Esdeveniment guardat" else "Esdeveniment desat"
+            try {
+                val owner = requestedOwner ?: api.ensureGuestIdentity().also { created ->
+                    if (account == null) guestReadyUserId = created
+                }
+                if ((account?.id ?: guestReadyUserId) != owner || api.activePersonalId() != owner) return@work
+                val desired = event.id !in user.saved
+                var queued = false
+                try {
+                    api.saveEvent(event, desired, chosenTowns.firstOrNull().orEmpty(),
+                        chosenComarques.firstOrNull().orEmpty())
+                } catch (_: IosQueuedForRetryException) {
+                    queued = true // durable encrypted queue, NOT a MariaDB confirmation
+                }
+                if ((account?.id ?: guestReadyUserId) == owner && api.activePersonalId() == owner) {
+                    savedEditRevision += 1
+                    user = user.copy(saved = if (desired) user.saved + event.id else user.saved - event.id)
+                    status = if (queued) (if (desired) "Guardat pendent de sincronització" else "Eliminació pendent de sincronització") else
+                        if (desired) "Esdeveniment guardat al servidor" else "Esdeveniment eliminat dels guardats"
+                    serverStateRefreshEpoch += 1
+                }
+            } finally {
+                savingEventIds = savingEventIds - event.id
+            }
         }
     }
     fun toggleReminder(event: AgendaEventSummary, next: Boolean, reminderAt: String = "") {
-        // Guests use local iOS notifications (identity 0); no private API is called.
-        val requestUserId = account?.id ?: 0
+        val requestUserId = account?.id ?: guestReadyUserId
+        if (requestUserId == null) { status = "S'està creant la identitat del convidat"; return }
         work {
-            if (next) {
-                require(reminderAt.matches(Regex("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}"))) {
+            val epoch = if (next) {
+                require(IosReminderPolicy.validLocalDateTime(reminderAt)) {
                     "Cal indicar data i hora (AAAA-MM-DD HH:MM)."
                 }
-                require(reminderAt.take(10) <= event.endDate.ifBlank { event.date }) {
+                require(reminderAt.take(10) <= event.endDate.ifBlank { event.date }.take(10)) {
                     "El recordatori no pot ser posterior a l'activitat."
                 }
-                require(platformScheduleReminder(requestUserId, event.id, event.title, reminderAt)) {
-                    "iOS no ha pogut programar l'avís. Comprova la data i el permís de notificacions."
+                (IosNativeBridge.current?.reminderEpochMillis(reminderAt) ?: 0L).also {
+                    IosReminderPolicy.requireFuture(event.id, true, it, currentEpochMillis())
                 }
-                if ((account?.id ?: 0) != requestUserId) {
-                    platformCancelReminder(requestUserId, event.id)
-                    return@work
-                }
-                if (requestUserId > 0) {
-                    try { api.alertEvent(event, true) }
-                    catch (ex: Exception) {
-                        platformCancelReminder(requestUserId, event.id)
-                        throw ex
-                    }
-                }
-                platformWritePublicCache(iosReminderKey(requestUserId, event.id), reminderAt)
-                val nextAlerts = user.alerts + event.id
-                // Android parity: enabling an event bell also adds it to General.
-                val nextSaved = user.saved + event.id
-                if (requestUserId == 0) {
-                    platformWritePublicCache(iosScopedCacheKey("alert_events", null),
-                        IosAccountCachePolicy.encode(nextAlerts.map(Int::toString).toSet()))
-                    platformWritePublicCache(iosScopedCacheKey("saved_events", null),
-                        IosAccountCachePolicy.encode(nextSaved.map(Int::toString).toSet()))
-                } else if (event.id !in user.saved) {
-                    runCatching { api.saveEvent(event, true) }.onFailure {
-                        status = "Recordatori activat; el guardat general no s'ha pogut sincronitzar"
-                    }
-                }
-                if ((account?.id ?: 0) == requestUserId) {
-                    user = user.copy(alerts = nextAlerts, saved = nextSaved)
-                    if (status.isBlank()) status = "Recordatori programat en iPhone"
-                }
-            } else {
-                if (requestUserId > 0) api.alertEvent(event, false)
-                platformCancelReminder(requestUserId, event.id)
-                if ((account?.id ?: 0) == requestUserId) {
-                    platformWritePublicCache(iosReminderKey(requestUserId, event.id), "")
-                    val nextAlerts = user.alerts - event.id
-                    if (requestUserId == 0) platformWritePublicCache(iosScopedCacheKey("alert_events", null),
-                        IosAccountCachePolicy.encode(nextAlerts.map(Int::toString).toSet()))
-                    user = user.copy(alerts = nextAlerts)
-                    status = "Recordatori desactivat"
-                }
+            } else 0L
+            var queued = false
+            try {
+                api.configureEventReminder(event, next, epoch,
+                    serverState?.takeIf { it.userId == requestUserId }?.central?.strings("event_ids"))
+            } catch (_: IosQueuedForRetryException) {
+                queued = true // Both the state mutation and bell operation are safely queued.
+            }
+            // A previous iOS installation could have an old local UNNotificationRequest.
+            // The server now schedules the only authoritative reminder: avoid duplicate push.
+            platformCancelReminder(requestUserId, event.id)
+            if ((account?.id ?: guestReadyUserId) == requestUserId) {
+                reminderTimeOverrides = reminderTimeOverrides + ((requestUserId to event.id) to
+                    (if (next) reminderAt else ""))
+                user = user.copy(alerts = if (next) user.alerts + event.id else user.alerts - event.id)
+                if (!queued) serverStateRefreshEpoch += 1
+                status = if (queued) "Recordatori pendent de sincronització amb el servidor"
+                    else if (next) "Recordatori guardat al servidor" else "Recordatori desactivat"
             }
         }
     }
-
-    fun toggleFollowEntity(type: String, value: String) {
-        val clean = value.trim()
-        if (clean.isBlank() || type !in setOf("ARTIST", "ORGANIZER", "VENUE", "CATEGORY")) return
-        val canonical = if (type == "CATEGORY") IosPersonalizationTaxonomy.canonicalFollowKey(clean) else clean
-        val follow = IosFollow(type, canonical, if (type == "CATEGORY") {
-            IosPersonalizationTaxonomy.categoryLabel(canonical).let {
-                if (it == canonical) IosPersonalizationTaxonomy.subcategoryLabel(canonical) else it
-            }
-        } else clean)
-        val expectedId = account?.id
-        val actionId = "$type:$canonical"
-        if (actionId in pendingFollows) return
-        val next = !IosGuestFollowTransfer.contains(user.follows, follow)
+    /** Android v336: entity_type + entity_key is the identity, including for guests.
+     * Distinct professional usernames must never be replaced by their public labels.
+     */
+    fun toggleFollowEntity(type: String, value: String, label: String = value) {
+        val cleanLabel = label.trim().ifBlank { value.trim() }
+        val cleanKey = resolvedFollowKey(type, value)
+        if (IosFollowMutation.canonicalKey(cleanKey).isBlank() || type !in IosFollowMutation.supported) return
+        val expectedId = account?.id ?: guestReadyUserId
         if (expectedId == null) {
-            val nextFollows = IosFollowMutation.updated(user.follows,type,canonical,follow.label,next)
-            guestFollowTransfer.setGuest(nextFollows)
-            user = user.copy(follows = nextFollows)
-            status = if (next) "Ara seguixes $clean" else "Has deixat de seguir $clean"
+            status = "S'està creant el teu usuari convidat al servidor"
             return
         }
+        val expectedUsername = account?.username
+        val actionId = "$type:${IosFollowMutation.canonicalKey(cleanKey)}"
+        if (actionId in pendingFollows) return
+        val next = !IosFollowMutation.contains(user.follows, type, cleanKey)
         pendingFollows = pendingFollows + actionId
         work {
             try {
-                followSyncMutex.withLock {
-                    if (account?.id != expectedId) return@withLock
-                    api.followEntity(type, canonical, follow.label, next)
-                    if (account?.id != expectedId) return@withLock
-                    // An explicit unfollow must not be re-added by the pending guest journal.
-                    if (!next) guestFollowTransfer.acknowledge(expectedId, follow)
-                    user = user.copy(follows = IosFollowMutation.updated(user.follows,
-                        type,canonical,follow.label,next))
-                    status = if (next) "Ara seguixes $clean" else "Has deixat de seguir $clean"
+                var queued = false
+                try {
+                    api.followEntity(type, cleanKey, cleanLabel, next)
+                } catch (_: IosQueuedForRetryException) {
+                    queued = true // Accepted into encrypted queue, NOT confirmed by MariaDB yet.
                 }
-            } finally { pendingFollows = pendingFollows - actionId }
+                if ((account?.id ?: guestReadyUserId) != expectedId || account?.username != expectedUsername) return@work
+                user = user.copy(follows = IosFollowMutation.updated(user.follows, type, cleanKey, cleanLabel, next))
+                followEditRevision += 1
+                if (!queued) serverStateRefreshEpoch += 1
+                status = if (queued) "Seguiment pendent de sincronitzar" else
+                    if (next) "Ara seguixes $cleanLabel" else "Has deixat de seguir $cleanLabel"
+                // The returned server snapshot (or pending overlay) is authoritative at next refresh.
+            } finally {
+                pendingFollows = pendingFollows - actionId
+            }
         }
     }
     fun toggleFollow(value: String) = toggleFollowEntity("ARTIST", value)
 
-    val notificationEntries = remember(notices,events,user.saved,artistBells,notificationPreferences,today,batecClockTick) {
-        IosNotificationParity.build(notices, events, user.saved, artistBells.values.toList(),
-            today,batecClockTick,notificationPreferences)
-    }
-    val notificationBadge = notificationEntries.count { entry ->
-        entry.key !in dismissedLocalNotifications && entry.key !in readLocalNotifications &&
-            (entry.remoteId == null || notices.firstOrNull { it.id == entry.remoteId }?.read == false)
-    }
-    val notificationSuggestions = remember(events,user.saved,user.follows,chosenCategories,chosenTowns,today,
-        showSuggestions,notificationPreferences) {
-        IosNotificationParity.suggestions(events,user.saved,user.follows.filter {it.type.equals("ARTIST",true)}.map{it.label}.toSet(),
-            chosenCategories,chosenTowns,today,showSuggestions && notificationPreferences.suggestions)
-    }
     MaterialTheme(colorScheme = lightColorScheme(primary = Ink, background = Color.White)) {
         Column(Modifier.fillMaxSize().background(Color.White)) {
             // Android parity: same horizontal logo and controls, stable symmetric layout.
-            if (tab != "Perfil") Row(Modifier.fillMaxWidth().height(82.dp).padding(horizontal = 10.dp),
+            Row(Modifier.fillMaxWidth().height(82.dp).padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically) {
-                AgendaTopAction("person", onClick = { profileReturnTab = tab; tab = "Perfil" })
-                AgendaTopAction("plus", color = AgendaGold, onClick = { publisherOpen = true })
+                AgendaTopAction("person", onClick = { tab = "Perfil" })
+                AgendaTopAction("plus", color = AgendaGold, onClick = {
+                    // Android v336: + opens PublishActionsSheet, for guests as well.
+                    publisherMenuOpen = true
+                })
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     AgendaBrandLogo(Modifier.fillMaxWidth().widthIn(max = 175.dp).height(58.dp))
                 }
-                AgendaTopAction("sliders", onClick = { prefSyncPending = account != null; prefSyncError = ""; prefOpen = true; prefRefreshEpoch++ })
+                AgendaTopAction("sliders", onClick = { prefOpen = true })
                 AgendaTopAction("bell", onClick = {
                     notificationsOpen = true
                     if (account != null) loadAccountPages()
-                }, badge = notificationBadge)
+                }, badge = notices.count { !it.read })
             }
             if (error.isNotBlank()) {
                 Surface(color = Color(0xFFFFEFEF), modifier = Modifier.fillMaxWidth()) {
@@ -1252,16 +1169,12 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                             focusedBorderColor = Color.Transparent),
                                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                                         keyboardActions = KeyboardActions(onSearch = {
-                                            if (query.isNotBlank()) {
-                                                feedMode = "Sense filtre"; selectedFeedCategory = null; activeFilterPresetName = null
-                                            }
-                                            IosFeedReadingSession.clear()
                                             appliedQuery = query.trim(); appliedSuggestion = chosenSuggestion
-                                            limit = 5; IosRecentInterest.recordSearch(account?.id, appliedQuery, available)
+                                            limit = 5; recordSearchOnServer(appliedQuery)
                                         }))
                                 }
                                 Row(Modifier.height(52.dp).background(Color(0xFFF2F2F2), RoundedCornerShape(14.dp))
-                                    .clickable { searchFiltersOpen = true }
+                                    .clickable { searchFiltersOpen = !searchFiltersOpen }
                                     .padding(horizontal = 10.dp),
                                     horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                                     AgendaGlyph("sliders", Modifier.size(20.dp), AgendaGold)
@@ -1270,10 +1183,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                             }
                             if (query.isNotBlank()) {
                                 TextButton(onClick = {
-                                    feedMode = "Sense filtre"; selectedFeedCategory = null; activeFilterPresetName = null
-                                    IosFeedReadingSession.clear()
                                     appliedQuery = query.trim(); appliedSuggestion = chosenSuggestion
-                                    limit = 5; IosRecentInterest.recordSearch(account?.id, appliedQuery, available)
+                                    limit = 5; recordSearchOnServer(appliedQuery)
                                 }, modifier = Modifier.align(Alignment.End)) { Text("Cercar") }
                             }
                             if (suggestions.isNotEmpty() && query.trim() == suggestionDraft && chosenSuggestion == null && tab == "Inici") {
@@ -1281,15 +1192,13 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                                     .heightIn(max = 216.dp).verticalScroll(rememberScrollState())) {
                                     suggestions.forEach { suggestion ->
                                         Row(Modifier.fillMaxWidth().clickable {
-                                            feedMode = "Sense filtre"; selectedFeedCategory = null; activeFilterPresetName = null
                                             chosenSuggestion = suggestion
                                             query = suggestion.value
-                                            IosFeedReadingSession.clear()
                                             appliedQuery = suggestion.value
                                             appliedSuggestion = suggestion
                                             suggestionDraft = ""
                                             limit = 5
-                                            IosRecentInterest.recordSearch(account?.id, suggestion.value, available)
+                                            recordSearchOnServer(suggestion.value)
                                         }.padding(vertical = 7.dp, horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                                             Text(when(suggestion.type) {
                                                 IosSearchType.ARTIST -> "♫"
@@ -1314,234 +1223,328 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                             // Contractual HEADER creative before batecs, as Android. No duplicate in LazyColumn.
                             SponsoredCarousel("Capçalera", paid.ads.filter { it.placement == "HEADER" },
                                 eventById, ::adViewed, ::adOpened, header = true)
-                            if (followedGroups.size >= 6) {
+                            if ((account != null || guestReadyUserId != null) && followedGroups.size >= 6) {
                                 LazyRow(
                                     state = batecRowState,
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
-                                    contentPadding = PaddingValues(horizontal = 14.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(9.dp)
+                                    modifier = Modifier.fillMaxWidth()
+                                        .pointerInput(Unit) {
+                                            awaitEachGesture {
+                                                awaitFirstDown(requireUnconsumed = false)
+                                                keepBatecStripAtStart = false
+                                            }
+                                        }
+                                        .padding(top = 2.dp, bottom = 5.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     items(followedGroups, key = { it.key }) { group ->
-                                        val cover = activeBatecs.firstOrNull { it.storyKey == group.openingStoryKey }
-                                        Column(
-                                            Modifier.width(67.dp).clickable { batecStoryKey = group.key },
-                                            horizontalAlignment = Alignment.CenterHorizontally
-                                        ) {
-                                            Box(
-                                                Modifier.size(56.dp)
-                                                    .border(2.dp, if (group.allSeen) Color(0xFFAAAAAA) else Color(0xFF8F59AD), CircleShape)
-                                                    .padding(3.dp).clip(CircleShape)
-                                                    .background(if (group.allSeen) Color(0xFFE5E5E5) else Accent),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Poster(
-                                                    cover?.imageUrl.orEmpty().ifBlank {
-                                                        cover?.eventId?.let { eventById[it]?.posterUrl }.orEmpty()
-                                                    },
-                                                    Modifier.fillMaxSize().clip(CircleShape).alpha(if (group.allSeen) 0.43f else 1f)
-                                                )
-                                                if (group.storyKeys.size > 1) {
-                                                    Box(Modifier.align(Alignment.TopEnd).size(19.dp)
-                                                        .background(Color.White, CircleShape), contentAlignment = Alignment.Center) {
-                                                        Text(group.storyKeys.size.coerceAtMost(99).toString(),
-                                                            color = Ink, fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                                    }
-                                                }
-                                            }
-                                            Spacer(Modifier.height(4.dp))
-                                            Text(group.artist, fontSize = 10.sp, maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                color = if (group.allSeen) Color.Gray else Ink)
-                                        }
+                                        val cover = batecs.firstOrNull { it.storyKey == group.openingStoryKey }
+                                        BatecBubble(
+                                            group = group,
+                                            photoUrl = cover?.imageUrl.orEmpty().ifBlank {
+                                                cover?.eventId?.let { eventById[it]?.posterUrl }.orEmpty()
+                                            },
+                                            onClick = { openBatecs(group.key) }
+                                        )
                                     }
                                 }
                             }
-                            // Android's 3 independent selectors: search modes/presets, followed artists and categories.
+                            // Android feed tabs and total: modes do not displace the search box.
                             Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 5.dp, bottom = 3.dp),
-                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 var modeMenu by remember { mutableStateOf(false) }
-                                var categoryMenu by remember { mutableStateOf(false) }
                                 Box {
-                                    val modeSelected = feedMode == "Per a tu" || feedMode == "Sense filtre"
-                                    val modeLabel = when {
-                                        appliedQuery.isNotBlank() -> "Resultats de cerca"
-                                        activeFilterPresetName != null -> activeFilterPresetName.orEmpty()
-                                        searchInProgress -> "Filtres actius"
-                                        feedMode == "Sense filtre" -> "Sense filtre"
-                                        else -> "Per a tu"
-                                    }
-                                    Surface(shape = RoundedCornerShape(10.dp),
-                                        color = if (modeSelected) Color(0xFFEAEAEA) else Color.Transparent,
-                                        modifier = Modifier.clickable {
-                                            modeMenu = true
-                                            if (account != null) {
-                                                val expected = account?.id
-                                                work {
-                                                    val newest = runCatching { api.savedSearches() }.getOrNull()
-                                                    if (account?.id == expected && newest != null) searchPresets = newest
-                                                }
-                                            }
-                                        }) {
-                                        Text("$modeLabel ▾", modifier = Modifier.widthIn(max = 123.dp)
-                                            .padding(horizontal = 9.dp, vertical = 9.dp), maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            fontWeight = if (modeSelected) FontWeight.Bold else FontWeight.Medium,
-                                            fontSize = 13.sp)
+                                    Surface(shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFF4F4F4),
+                                        modifier = Modifier.clickable { modeMenu = true }) {
+                                        Text("$feedMode ▾", modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                            fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                                     }
                                     DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
                                         listOf("Per a tu", "Sense filtre").forEach { mode ->
                                             DropdownMenuItem(text = { Text(mode) }, onClick = {
-                                                chooseFeedMode(mode); modeMenu = false
-                                            })
-                                        }
-                                        searchPresets.forEach { preset ->
-                                            DropdownMenuItem(onClick = {
-                                                if (applyNamedPreset(preset)) modeMenu = false
-                                            }, text = {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    Text(preset.name, Modifier.weight(1f), maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis)
-                                                    IconButton(onClick = {
-                                                        val expected = account?.id
-                                                        work {
-                                                            api.removeSavedSearch(preset.name)
-                                                            if (account?.id == expected) {
-                                                                searchPresets = searchPresets.filterNot { it.name == preset.name }
-                                                                if (activeFilterPresetName == preset.name) chooseFeedMode("Per a tu")
-                                                            }
-                                                        }
-                                                    }, modifier = Modifier.size(38.dp)) {
-                                                        Text("×", fontSize = 19.sp)
-                                                    }
-                                                }
+                                                feedMode = mode; limit = 5; modeMenu = false
                                             })
                                         }
                                     }
                                 }
-                                Surface(shape = RoundedCornerShape(10.dp),
-                                    color = if (feedMode == "Seguits") Color(0xFFEAEAEA) else Color.Transparent,
-                                    modifier = Modifier.clickable { chooseFeedMode("Seguits") }) {
-                                    Text("Seguits", modifier = Modifier.padding(horizontal = 9.dp, vertical = 9.dp),
-                                        fontWeight = if (feedMode == "Seguits") FontWeight.Bold else FontWeight.Medium,
-                                        fontSize = 13.sp)
-                                }
-                                Box {
-                                    Surface(shape = RoundedCornerShape(10.dp),
-                                        color = if (feedMode == "Categoria") Color(0xFFEAEAEA) else Color.Transparent,
-                                        modifier = Modifier.clickable { categoryMenu = true }) {
-                                        Text("${if (feedMode == "Categoria") IosFeedModePolicy.categoryLabel(selectedFeedCategory) else "Categoria"} ▾",
-                                            modifier = Modifier.widthIn(max = 120.dp)
-                                                .padding(horizontal = 9.dp, vertical = 9.dp),
-                                            fontWeight = if (feedMode == "Categoria") FontWeight.Bold else FontWeight.Medium,
-                                            fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    }
-                                    DropdownMenu(expanded = categoryMenu, onDismissRequest = { categoryMenu = false }) {
-                                        if (feedMode == "Categoria") {
-                                            DropdownMenuItem(text = { Text("Llevar disciplina · Per a tu") }, onClick = {
-                                                chooseFeedMode("Per a tu"); categoryMenu = false
-                                            })
-                                        }
-                                        (IosPersonalizationTaxonomy.categories + IosPersonalizationTaxonomy.children).forEach { category ->
-                                            DropdownMenuItem(text = { Text(category.label) }, onClick = {
-                                                chooseFeedMode("Categoria", category.code); categoryMenu = false
-                                            })
-                                        }
-                                    }
-                                }
+                                Text("Seguits", modifier = Modifier.clickable {
+                                    feedMode = "Per a tu"; limit = 5
+                                }, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                Text("Categoria ▾", modifier = Modifier.clickable { searchFiltersOpen = true }, fontSize = 13.sp)
                                 Spacer(Modifier.weight(1f))
                                 Text("${personalizedFeed.size} esdev.", color = Color.Gray, fontSize = 11.sp)
                             }
                             if (searchInProgress || query.isNotBlank()) {
                                 TextButton(onClick = {
                                     query = ""; appliedQuery = ""; chosenSuggestion = null; appliedSuggestion = null
-                                    chooseFeedMode("Per a tu")
+                                    searchTown = ""; searchComarca = ""; searchRadius = 0
+                                    searchCategory = ""; searchStyle = ""; searchFromDate = ""; searchToDate = ""; searchMonth = "";
+                                    searchPriceLimit = null; searchFreeOnly = false; searchCategories = emptySet()
+                                    appliedSearchFilters = IosSearchFilters(); limit = 5
                                 }) { Text("Netejar cerca") }
+                            }
+                            if (searchFiltersOpen) {
+                                Dialog(onDismissRequest = { searchFiltersOpen = false }) {
+                                Surface(shape = RoundedCornerShape(18.dp), color = Color.White) {
+                                Column(Modifier.fillMaxWidth().heightIn(max = 690.dp)
+                                    .verticalScroll(rememberScrollState()).padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically) {
+                                        Text("Filtres de cerca", fontWeight = FontWeight.Bold, fontSize = 19.sp)
+                                        TextButton(onClick = { searchFiltersOpen = false }) { Text("Tancar") }
+                                    }
+                                    OutlinedTextField(searchTown, { searchTown = it; territoryTownChosen = false; if (it.isBlank()) searchRadius = 0 },
+                                        label = { Text("On? Poble") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                                    if (searchTown.length >= 2) {
+                                        if (territoryTownDraft == searchTown) townSuggestions.forEach { town ->
+                                            TextButton(onClick = { searchTown = town.value; territoryTownChosen = true; territoryTownDraft = "" }) {
+                                                Column(horizontalAlignment = Alignment.Start) {
+                                                    Text("⌖ ${town.value}")
+                                                    if (town.subtitle.isNotBlank()) Text(town.subtitle, fontSize = 10.sp, color = Color.Gray)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    OutlinedTextField(searchComarca, { searchComarca = it; territoryComarcaChosen = false },
+                                        label = { Text("Comarca") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                                    if (searchComarca.length >= 2) {
+                                        if (territoryComarcaDraft == searchComarca) comarcaSuggestions.forEach { comarca ->
+                                            TextButton(onClick = { searchComarca = comarca.value; territoryComarcaChosen = true; territoryComarcaDraft = "" }) {
+                                                Text("▱ ${comarca.value}")
+                                            }
+                                        }
+                                    }
+                                    Text("Radi des del poble (0 km = només el poble)", fontSize = 12.sp)
+                                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        listOf(0,5,15,30,50,100).forEach { radius ->
+                                            FilterChip(selected = searchRadius == radius, enabled = searchTown.isNotBlank() || radius == 0,
+                                                onClick = { searchRadius = radius }, label = { Text("$radius km") })
+                                        }
+                                    }
+                                    Text("Categories (pots marcar-ne diverses)", fontSize = 12.sp)
+                                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                        FilterChip(selected = searchCategories.isEmpty() && searchCategory.isBlank(),
+                                            onClick = { searchCategories = emptySet(); searchCategory = "" }, label = { Text("Totes") })
+                                        categoriesForSearch.forEach { category ->
+                                            val code = IosCategoryTaxonomy.mainKey(category)
+                                            if (code != null) FilterChip(selected = code in searchCategories,
+                                                onClick = { searchCategories = if (code in searchCategories) searchCategories - code
+                                                    else searchCategories + code; searchCategory = "" }, label = { Text(category) })
+                                        }
+                                    }
+                                    OutlinedTextField(searchStyle, { searchStyle = it }, label = { Text("Estil / subcategoria") },
+                                        singleLine = true, modifier = Modifier.fillMaxWidth())
+                                    if (searchStyle.length >= 2) stylesForSearch.asSequence().filter { it.contains(searchStyle,true) }
+                                        .take(6).forEach { style -> TextButton(onClick = { searchStyle = style }) { Text("# $style") } }
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        OutlinedTextField(searchFromDate, { searchFromDate = it.take(10) },
+                                            label = { Text("Des de (AAAA-MM-DD)") }, singleLine = true, modifier = Modifier.weight(1f))
+                                        OutlinedTextField(searchToDate, { searchToDate = it.take(10) },
+                                            label = { Text("Fins a (AAAA-MM-DD)") }, singleLine = true, modifier = Modifier.weight(1f))
+                                    }
+                                    OutlinedTextField(searchMonth, { searchMonth = it.take(7) },
+                                        label = { Text("Mes (AAAA-MM)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                                    Text("Preu de l'entrada", fontSize = 12.sp)
+                                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        listOf(null, 10, 15, 20).forEach { price ->
+                                            FilterChip(selected = !searchFreeOnly && searchPriceLimit == price,
+                                                onClick = { searchFreeOnly = false; searchPriceLimit = price },
+                                                label = { Text(if (price == null) "Qualsevol" else "≤ $price €") })
+                                        }
+                                        FilterChip(selected = searchFreeOnly, onClick = {
+                                            searchFreeOnly = !searchFreeOnly; if (searchFreeOnly) searchPriceLimit = null
+                                        }, label = { Text("Gratuït") })
+                                    }
+                                    val draft = IosSearchFilters(searchTown.trim(), searchComarca.trim(), searchRadius,
+                                        searchCategory.trim(), searchStyle.trim(), searchFromDate.trim(), searchToDate.trim(),
+                                        categoryCodes = searchCategories, month = searchMonth.trim(),
+                                        maxPrice = searchPriceLimit, freeOnly = searchFreeOnly)
+                                    if (!draft.valid()) Text("Revisa les dates, el mes i el radi; per a la distància cal un poble.",
+                                        color = Color.Red, fontSize = 12.sp)
+                                    OutlinedTextField(newSearchName, { newSearchName = it.take(52) },
+                                        label = { Text("Nom per a guardar els filtres") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                                    if (searchStyle.isNotBlank()) Text("L'estil s'aplica a la cerca, però Android no el pot guardar en les seues llistes. Lleva'l abans de guardar.",
+                                        color = Color(0xFF934F00), fontSize = 11.sp)
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        Button(modifier = Modifier.weight(1f), enabled = draft.valid(), onClick = {
+                                            appliedSearchFilters = draft; appliedQuery = query.trim(); appliedSuggestion = chosenSuggestion
+                                            searchFiltersOpen = false; limit = 5
+                                        }) { Text("Aplicar") }
+                                        OutlinedButton(modifier = Modifier.weight(1f),
+                                            enabled = draft.valid() && draft.isActive && newSearchName.trim().isNotBlank() &&
+                                                !searchPresetSaving && searchStyle.isBlank() &&
+                                                (account?.id ?: guestReadyUserId) != null,
+                                            onClick = {
+                                                val owner = account?.id ?: guestReadyUserId
+                                                searchPresetRevision += 1 // invalidate in-flight GETs before mutating
+                                                val revisionBefore = searchPresetRevision
+                                                val name = newSearchName.trim()
+                                                searchPresetSaving = true
+                                                work {
+                                                    try {
+                                                        val confirmed = api.saveSearch(name, draft)
+                                                        if ((account?.id ?: guestReadyUserId) == owner &&
+                                                            searchPresetRevision == revisionBefore) {
+                                                            searchPresets = confirmed; searchPresetRevision += 1
+                                                            newSearchName = ""; status = "Filtres guardats al servidor"
+                                                            appliedSearchFilters = draft.copy(preferredTowns = chosenTowns)
+                                                            appliedQuery = query.trim(); appliedSuggestion = chosenSuggestion
+                                                            searchFiltersOpen = false; limit = 5
+                                                        }
+                                                    } finally {
+                                                        if ((account?.id ?: guestReadyUserId) == owner) searchPresetSaving = false
+                                                    }
+                                                }
+                                            }) { Text(if (searchPresetSaving) "Guardant…" else "Guardar") }
+                                    }
+                                    Text("Els filtres restringixen els resultats de la cerca; la publicitat conserva els seus espais.",
+                                        fontSize = 10.sp, color = Color.Gray)
+                                    if (searchPresets.isNotEmpty()) Text("Cerques guardades", fontWeight = FontWeight.SemiBold)
+                                    searchPresets.forEach { preset ->
+                                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                            TextButton(onClick = {
+                                                val f = preset.filters
+                                                searchTown = f.town; searchComarca = f.comarca; searchRadius = f.radiusKm
+                                                searchCategory = f.category; searchCategories = f.categoryCodes
+                                                searchStyle = ""; searchFromDate = f.fromDate; searchToDate = f.toDate
+                                                searchMonth = f.month; searchPriceLimit = f.maxPrice; searchFreeOnly = f.freeOnly
+                                                appliedSearchFilters = f.copy(preferredTowns = chosenTowns); appliedQuery = query.trim(); appliedSuggestion = chosenSuggestion
+                                                searchFiltersOpen = false; limit = 5
+                                            }, modifier = Modifier.weight(1f)) { Text(preset.name, maxLines = 1) }
+                                            TextButton(onClick = {
+                                                val owner = account?.id ?: guestReadyUserId
+                                                searchPresetRevision += 1 // invalidate in-flight GETs
+                                                val before = searchPresetRevision
+                                                work {
+                                                    val confirmed = api.removeSavedSearch(preset.name)
+                                                    if ((account?.id ?: guestReadyUserId) == owner && before == searchPresetRevision) {
+                                                        searchPresets = confirmed; searchPresetRevision += 1
+                                                        status = "Llista de filtres eliminada del servidor"
+                                                    }
+                                                }
+                                            }) { Text("Eliminar") }
+                                        }
+                                    }
+                                }
+                                }
+                                }
                             }
                             if (searchInProgress) {
                                 Text("Filtres actius · ${filtered.size} resultats orgànics", fontSize = 11.sp,
                                     color = Color.DarkGray, modifier = Modifier.padding(horizontal = 16.dp))
                             }
-                            if (feedMode == "Seguits" && user.follows.none { it.type.equals("ARTIST", true) }) {
-                                Text("Encara no seguixes cap artista o grup. Pots seguir-los des de Personalització.",
-                                    modifier = Modifier.padding(horizontal = 16.dp), fontSize = 13.sp)
-                            }
-                            if (feedMode == "Categoria" && selectedFeedCategory == null) {
-                                Text("Tria una categoria per vore els seus esdeveniments.",
-                                    modifier = Modifier.padding(horizontal = 16.dp), fontSize = 13.sp)
-                            }
-                            if (feedMode == "Per a tu" && account != null && !user.follows.any { it.type == "ARTIST" } && chosenCategories.isEmpty()) {
+                            if (feedMode == "Per a tu" && (account != null || guestReadyUserId != null) && !user.follows.any { it.type == "ARTIST" } && chosenCategories.isEmpty()) {
                                 Text("Seguix artistes o tria categories a Personalització.", modifier = Modifier.padding(horizontal = 16.dp), fontSize = 13.sp)
                             }
-                            if (updating) LinearProgressIndicator(
+                            if (manualRefreshing) LinearProgressIndicator(
                                 modifier = Modifier.fillMaxWidth().height(2.dp), color = Ink, trackColor = Accent)
                                 },
-                                onLoadMore = { limit = IosUnfilteredFeedPolicy.nextCount(limit, personalizedFeed.size) },
+                                onLoadMore = {
+                                    limit = IosFeedReadingPolicy.page(limit, personalizedFeed.size)
+                                },
                                 today = today,
-                                scrollContext = "${feedMode}|${selectedFeedCategory}|${activeFilterPresetName}|${appliedQuery}|${effectiveSearchFilters.hashCode()}|${account?.id}",
-                                readingEnabled = !awaitingInitialAccount && feedMode == "Per a tu" && !searchInProgress && activeFilterPresetName == null,
-                                loadedCount = limit,
-                                onRestoreLoaded = { required -> limit = maxOf(limit, required) },
-                                feedExpiredEpoch = feedExpiredEpoch,
-                                catalogHydrated = IosEventCatalog.fullyHydrated(),
-                                savedIds = user.saved, onClick = { showEvent(it, appliedQuery) }, onSave = ::toggleSaved,
+                                scrollContext = readingViewKey,
+                                restoreReading = readingOwner?.let {
+                                    readingMemory.restore(it, readingViewKey, currentEpochMillis())
+                                },
+                                readingRestoreEpoch = readingRestoreEpoch,
+                                onReadingPosition = { index, offset, settled ->
+                                    val owner = readingOwner
+                                    if (owner != null && tab == "Inici") {
+                                        if (index != 0 || offset != 0 || readingMemory.initialized(owner)) {
+                                            readingMemory.record(owner, readingViewKey, limit, index, offset, currentEpochMillis())
+                                            if (settled) readingPersistEpoch += 1
+                                        }
+                                    }
+                                },
+                                savedIds = user.saved,
+                                artistSearch = searchedArtist.orEmpty(),
+                                festivalSchedules = artistFestivalSchedule,
+                                onClick = { showEvent(it, searchedArtist.orEmpty()) }, onSave = ::toggleSaved,
                                 ads = paid.ads, protectedIds = paid.guaranteedEventIds,
                                 commercialEvents = eventById,
                                 onAdViewed = ::adViewed, onAdOpened = ::adOpened,
-                                refreshing = updating, onRefresh = {
-                                    IosFeedReadingSession.clear()
-                                    feedExpiredEpoch++
-                                    limit = 5
+                                refreshing = manualRefreshing, onRefresh = {
+                                    if (!updating) {
+                                    // Explicit gesture bypasses the 30-minute catalog cache.
+                                    // Recomposition/automatic updates never reset reading.
+                                    readingMemory.discard()
+                                    limit = IosFeedReadingPolicy.initial
+                                    readingRestoreEpoch += 1
                                     refresh(true)
+                                    }
                                 },
                                 returnToStartEpoch = batecsReturnEpoch,
                                 onExclude = ::excludeFromFeed, onReport = { reportEvent = it })
                         }
                     }
                     "Guardats" -> {
-                        val visibleAccountId = account?.id ?: 0
-                        key(visibleAccountId) {
-                            IosSavedAgendaScreen(
-                                accountId = visibleAccountId,
-                                authenticated = account != null,
-                                onLoginRequired = { loginOpen = true },
-                                user = user,
-                                lists = if (account == null) emptyList() else savedLists,
-                                available = available,
-                                today = today,
-                                api = api,
-                                work = ::work,
-                                onListsChanged = { result -> if (account?.id == visibleAccountId && visibleAccountId > 0) savedLists = result },
-                                onStatus = { status = it },
-                                onOpenEvent = { event, matchedArtist -> showEvent(event, matchedArtist, matchedArtist.isNotBlank()) },
-                                onToggleSaved = ::toggleSaved,
-                                onDisableReminder = { alertToDisable = it },
-                                reminderTime = { event -> platformReadPublicCache(iosReminderKey(visibleAccountId,event.id)) },
-                                festivalRevision = savedFestivalRevision
-                            )
+                        val savedOwnerId = account?.id ?: guestReadyUserId
+                        if (savedOwnerId == null) {
+                            Column(Modifier.fillMaxSize()) {
+                                PageTitle("Les meues agendes")
+                                Text("Recuperant el compte de convidat…", modifier = Modifier.padding(16.dp))
+                            }
+                        } else {
+                            val expectedAccountId = savedOwnerId
+                            key(expectedAccountId) {
+                                IosSavedAgendaScreen(
+                                    accountId = expectedAccountId,
+                                    user = user,
+                                    lists = savedLists,
+                                    available = savedCatalog,
+                                    today = savedCulturalToday,
+                                    api = api,
+                                    work = ::work,
+                                    onListsChanged = { result -> if ((account?.id ?: guestReadyUserId) == expectedAccountId) {
+                                        savedListsRevision += 1; savedLists = result
+                                    } },
+                                    onStatus = { status = it },
+                                    onOpenEvent = { event, matchedArtist -> showEvent(event, matchedArtist) },
+                                    onToggleSaved = ::toggleSaved,
+                                    onDisableReminder = { alertToDisable = it },
+                                    reminderTime = { event -> remoteReminderTime(event.id) },
+                                    festivalRevision = savedFestivalRevision,
+                                    remoteFestivalSlots = { eventId ->
+                                        festivalSlotOverrides[expectedAccountId to eventId]
+                                            ?: serverState?.personalFestivalSlots(eventId).orEmpty()
+                                    },
+                                    onSaveFestivalSlots = { eventId, next ->
+                                        updateFestivalSlots(expectedAccountId, eventId, next)
+                                    }
+                                )
+                            }
                         }
                     }
                     "Entrades" -> {
                         Column(Modifier.fillMaxSize()) {
                             PageTitle("Les meues entrades")
-                            if (account == null) {
-                                Text("Pots consultar les entrades disponibles des de la fitxa de qualsevol esdeveniment. Per recuperar les entrades comprades o emeses al teu nom, inicia sessió.",
-                                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp), fontSize = 14.sp)
-                                TextButton(onClick = { tab = "Inici" }, modifier = Modifier.padding(horizontal = 12.dp)) {
-                                    Text("Buscar esdeveniments")
-                                }
-                                TextButton(onClick = { loginOpen = true }, modifier = Modifier.padding(horizontal = 12.dp)) {
-                                    Text("Iniciar sessió per recuperar entrades")
-                                }
+                            if (account == null && guestReadyUserId == null &&
+                                !api.hasRegisteredSessionToken() && api.guestUserId() == null) {
+                                Text("Preparant el perfil de convidat del servidor…", modifier = Modifier.padding(16.dp))
                             } else {
-                                TextButton(onClick = { work { tickets = api.tickets() } }, modifier = Modifier.padding(horizontal = 12.dp)) { Text("↻ Actualitzar entrades") }
-                                if (tickets.isEmpty()) EmptyState("No hi ha entrades vinculades al teu compte.")
+                                TextButton(onClick = { work { reloadMyTickets() } },
+                                    modifier = Modifier.padding(horizontal = 12.dp)) { Text("↻ Actualitzar entrades") }
+                                if (ticketsOffline) Text(ticketLoadNotice, modifier = Modifier.padding(horizontal = 16.dp),
+                                    color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                                else if (ticketLoadNotice.isNotBlank()) Text(ticketLoadNotice,
+                                    modifier = Modifier.padding(horizontal = 16.dp), fontSize = 12.sp)
+                                if (tickets.isEmpty()) EmptyState("No hi ha entrades descarregades per a este compte.")
                                 else LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     items(tickets, key = { it.id }) { ticket ->
                                         ElevatedCard(Modifier.fillMaxWidth()) {
-                                            Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            Column(Modifier.padding(17.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                                 Text(ticket.eventTitle.ifBlank { ticket.eventId.toIntOrNull()?.let { eventById[it]?.title }.orEmpty() }.ifBlank { "Entrada ${ticket.id}" }, fontWeight = FontWeight.Bold)
-                                                Text("Estat: ${ticket.status}", fontSize = 13.sp)
+                                                Text("Estat: ${IosOfflineTicketPolicy.displayStatus(ticket.status)}" +
+                                                    if (ticketsOffline) " (última còpia)" else "", fontSize = 13.sp)
                                                 Text("Número: ${ticket.id}", fontSize = 12.sp)
+                                                val details = IosOfflineTicketPolicy.details(ticket)
+                                                if (details.isNotBlank()) Text(details, fontSize = 12.sp)
+                                                if (ticket.status.equals("USED", true) && ticket.validatedAt.isNotBlank()) {
+                                                    Text("Utilitzada: ${ticket.validatedAt}", fontSize = 12.sp)
+                                                }
                                                 if (ticket.code.isNotBlank()) {
                                                     Text("Codi: ${ticket.code}", fontSize = 12.sp)
                                                     Button(onClick = { showIssuedTicketQr(ticket.code, ticket.eventTitle.ifBlank {
@@ -1556,117 +1559,127 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                         }
                     }
                     "Comunitat" -> {
-                        IosCommunityHub(groups, api,
-                            isAdmin = account != null && IosCommunityPolicy.canSeeAdminQueue(account?.role.orEmpty()),
-                            authenticated = account != null,
-                            reload = { mine -> work {
-                                groups = if (account == null) api.publicCommunityGroups() else api.community(mine = mine)
-                            } },
+                        if ((account?.id ?: guestReadyUserId) == null) EmptyState("Connectant el perfil de convidat…")
+                        else IosCommunityHub(groups, api, currentUserId = account?.id ?: guestReadyUserId ?: 0,
+                            isAdmin = IosCommunityPolicy.canSeeAdminQueue(account?.role.orEmpty()),
+                            reload = { mine -> work { groups = api.community(mine=mine) } },
                             onOpen = { communityGroup = it })
                     }
                     "Perfil" -> {
-                        if (account == null) {
-                            IosGuestProfileScreen(
-                                onBack = { tab = profileReturnTab },
-                                onLogin = { loginOpen = true },
-                                onRegister = { registrationOpen = true },
-                                onSystemLanguageSettings = { sessionBridge?.showNotificationSettings() }
-                            )
-                        } else {
-                            IosAccountProfileScreen(
-                                account = account!!, profile = myProfile,
-                                settings = profileSettings, saving = profileSaving,
-                                onBack = { tab = profileReturnTab },
-                                onPickPhoto = {
-                                    sessionBridge?.pickProfilePhoto(object : IosPickedPhotoCallback {
-                                        override fun onComplete(base64Jpeg: String, imageError: String) {
-                                            if (imageError.isNotBlank()) { error = imageError; return }
-                                            val expectedId = account?.id
-                                            work {
-                                                val url = api.uploadMyPhoto(base64Jpeg)
-                                                if (expectedId != null && account?.id == expectedId) {
-                                                    myProfile = (myProfile ?: IosMyProfile(account?.username.orEmpty(), "", "")).copy(photoUrl = url)
-                                                    status = "Foto actualitzada"
-                                                }
+                        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text("Perfil", fontWeight = FontWeight.Bold, fontSize = 26.sp)
+                            if (account == null) {
+                                val serverGuestId = guestReadyUserId
+                                Text(if (serverGuestId == null) "Connectant el perfil al servidor…"
+                                    else "Convidat · ID de servidor: $serverGuestId", fontWeight = FontWeight.Medium)
+                                Text("Els guardats, seguiments, campanetes i preferències del convidat es desen al servidor.", fontSize = 13.sp)
+                                OutlinedButton(onClick = { prefOpen = true }, enabled = serverGuestId != null) {
+                                    Text("Preferències i personalització")
+                                }
+                                OutlinedButton(onClick = { notificationsOpen = true }, enabled = serverGuestId != null) {
+                                    Text("Notificacions i recordatoris")
+                                }
+                                OutlinedButton(onClick = {
+                                    serverStateRefreshEpoch += 1
+                                    refresh(true)
+                                }, enabled = serverGuestId != null) { Text("Actualitzar dades del servidor") }
+                                Button(onClick = { loginOpen = true }) { Text("Iniciar sessió o crear compte") }
+                                Text("El nom públic, el correu i la fotografia només són editables després de registrar el compte. No es crea un perfil públic fictici per al convidat.", fontSize = 12.sp, color = Color.Gray)
+                            } else {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    Box(Modifier.size(72.dp).clip(CircleShape).background(Accent), contentAlignment = Alignment.Center) {
+                                        if (!myProfile?.photoUrl.isNullOrBlank())
+                                            AsyncImage(model = myProfile?.photoUrl, contentDescription = "Foto del meu perfil", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                        else Text(account?.username.orEmpty().take(1).uppercase(), fontSize = 27.sp)
+                                    }
+                                    Column {
+                                        Text(myProfile?.displayName?.ifBlank { account?.username.orEmpty() } ?: account?.username.orEmpty(), fontWeight = FontWeight.Bold)
+                                        Text("@${account?.username.orEmpty()}", fontSize = 12.sp)
+                                        Text(account?.email.orEmpty(), fontSize = 12.sp)
+                                    }
+                                }
+                                OutlinedButton(onClick = {
+                                    val expectedId = account?.id
+                                    work {
+                                        val loaded = api.myPublicProfile()
+                                        if (account?.id == expectedId) { myProfile = loaded; editProfileOpen = true }
+                                    }
+                                }) { Text("Editar foto i perfil públic") }
+                                OutlinedButton(onClick = { editAccountOpen = true }) {
+                                    Text("Usuari, correu i població")
+                                }
+                                if (!myProfile?.homeTown.isNullOrBlank()) {
+                                    Text("Població: ${myProfile?.homeTown}", fontSize = 12.sp)
+                                }
+                                Text("Rol: ${serverPublisherAccess?.role ?: account?.role} · ${if (serverPublisherAccess != null && IosPublisherRoles.isProfessional(serverPublisherAccess!!)) "Professional verificat" else "Permisos pendents de consulta"}", fontSize = 12.sp)
+                                Text("Artistes seguits: ${user.follows.count { it.type == "ARTIST" }}")
+                                Button(onClick = {
+                                    loadAccountPages()
+                                    serverStateRefreshEpoch += 1
+                                }) { Text("Actualitzar dades") }
+                                if (account?.role != "SUPER_ADMIN") {
+                                    OutlinedButton(onClick = {
+                                        val expectedId = account?.id
+                                        work {
+                                            val settings = api.profileSettings()
+                                            if (expectedId != null && account?.id == expectedId) {
+                                                profileSettings = settings
+                                                profileSettingsOpen = true
                                             }
                                         }
-                                    }) ?: run { error = "El selector de fotografies no està disponible." }
-                                },
-                                onRemovePhoto = {
-                                    val expected = account?.id
-                                    work {
-                                        val base = myProfile ?: IosMyProfile(account?.username.orEmpty(), "", "")
-                                        val result = api.updateMyPublicProfile(base.displayName.ifBlank { account?.username.orEmpty() }, base.bio, true)
-                                        if (account?.id == expected) { myProfile = result; status = "Foto eliminada" }
-                                    }
-                                },
-                                onSave = { username, email, name, bio, role, phone ->
-                                    if (!profileSaving) {
-                                        profileSaving = true
-                                        val expected = account?.id
-                                        work {
-                                            try {
-                                                if (expected != null && account?.id == expected) {
-                                                    if (username != account?.username || email != account?.email) {
-                                                        account = api.updateMyAccountIdentity(username, email)
-                                                    }
-                                                    val updated = api.updateMyPublicProfile(name, bio)
-                                                    if (account?.id == expected) myProfile = updated
-                                                    val current = profileSettings
-                                                    if (account?.role != "SUPER_ADMIN" && current != null &&
-                                                        (role != current.role.uppercase() || (role == "PROFESSIONAL" && phone != current.phone))) {
-                                                        try {
-                                                            val saved = api.saveProfileSettings(role, phone)
-                                                            if (account?.id == expected) {
-                                                                profileSettings = saved
-                                                                account = account?.copy(role = saved.role)
-                                                            }
-                                                        } catch (roleError: Exception) {
-                                                            if (account?.id == expected) status = "Dades personals guardades; no s'ha canviat el rol"
-                                                            throw roleError
-                                                        }
-                                                    }
-                                                    if (account?.id == expected) {
-                                                        status = "Perfil guardat"
-                                                        // A new email may need verification even if the old one was confirmed.
-                                                        profileSettings = runCatching { api.profileSettings() }.getOrNull()
-                                                    }
-                                                }
-                                            } finally { profileSaving = false }
+                                    }) { Text("Tipus de compte i dades professionals") }
+                                }
+                                OutlinedButton(onClick = { deleteAccountOpen = true }) { Text("Eliminar el meu compte") }
+                                OutlinedButton(onClick = { work {
+                                    val leavingAccountId = account?.id
+                                    api.signOutSecurely() // clears local credentials even if remote logout is offline
+                                    sessionBridge?.eraseLocalAccountData(leavingAccountId ?: 0)
+                                    account = null; myProfile = null; user = IosUserState(); artistBells = emptyMap(); tickets = emptyList()
+                                    notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList(); searchTown = ""; searchCategory = ""; searchComarca = ""; searchStyle = ""; searchRadius = 0; searchFromDate = ""; searchToDate = ""; searchMonth = ""; searchPriceLimit = null; searchFreeOnly = false; searchCategories = emptySet(); searchPresetRevision += 1; searchPresetSaving = false; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null; newSearchName = ""
+                                    useAccountPreferences(null)
+                                    // Recover the existing guest (or issue one when first needed).
+                                    // Account claim/merge is deliberately deferred to step 3.
+                                    serverState = null
+                                    guestReadyUserId = runCatching { api.ensureGuestIdentity() }.getOrNull()
+                                    serverStateRefreshEpoch += 1
+                                    status = "Sessió tancada"
+                                } }) { Text("Tancar sessió") }
+                                if (serverPublisherAccess?.let(IosPublisherRoles::isProfessional) == true) {
+                                    Divider()
+                                    Button(onClick = { validatorOpen = true }) { Text("Validar entrades (PRO)") }
+                                    Text("El servidor comprova els permisos de cada esdeveniment.", fontSize = 11.sp, color = Color.Gray)
+                                }
+                                if (serverPublisherAccess?.let { IosPublisherRoles.isSuperAdmin(it.role) && it.serverConfirmed } == true) {
+                                    Divider()
+                                    IosSuperAdminConsole(api, actorId = account?.id ?: 0, initialSection = adminDestination, onMessage = { status = it })
+                                }
+                            }
+                            if ((account != null || guestReadyUserId != null) && user.follows.isNotEmpty()) {
+                                HorizontalDivider()
+                                Text("Els meus seguiments", fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(top = 10.dp, bottom = 5.dp))
+                                user.follows.distinctBy { it.type + "|" + it.key }.forEach { item ->
+                                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                        Text("${when (item.type.uppercase()) { "ARTIST" -> "Artista"; "VENUE" -> "Sala"; "ORGANIZER" -> "Organització"; "CATEGORY" -> "Categoria"; else -> item.type }} · ${item.label}",
+                                            fontSize = 12.sp, modifier = Modifier.weight(1f))
+                                        TextButton(onClick = { toggleFollowEntity(item.type.uppercase(), item.key.ifBlank { item.label }) }) {
+                                            Text("Deixar de seguir")
                                         }
                                     }
-                                },
-                                onSendEmailVerification = {
-                                    work { api.sendMyEmailVerification(); status = "Consulta el correu per confirmar l'adreça" }
-                                },
-                                onRefreshEmailVerification = {
-                                    val expected = account?.id
-                                    work { val next = api.profileSettings(); if (account?.id == expected) profileSettings = next }
-                                },
-                                onOpenPersonalization = { prefSyncPending = account != null; prefSyncError = ""; prefOpen = true; prefRefreshEpoch++ },
-                                onOpenNotificationSettings = { sessionBridge?.showNotificationSettings() },
-                                onOpenLanguageSettings = { sessionBridge?.showNotificationSettings() },
-                                onDeleteAccount = { deleteAccountOpen = true },
-                                onLogout = { work {
-                                    account?.id?.let { sessionBridge?.cancelAllLocalReminders(it) }
-                                    try { api.signOutSecurely() } catch (_: Exception) { api.signOut() }
-                                    account = null; myProfile = null; profileSettings = null
-                                    user = guestUserState(); artistBells = emptyMap(); tickets = emptyList()
-                                    notices = emptyList(); groups = emptyList(); seenBatecs = emptySet()
-                                    batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList()
-                                    activeFilterPresetName = null; selectedFeedCategory = null
-                                    appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""
-                                    appliedSuggestion = null; chosenSuggestion = null
-                                    useAccountPreferences(null); tab = "Inici"
-                                    status = "Sessió tancada"
-                                } },
-                                api = api, onMessage = { status = it }
-                            )
+                                }
+                            }
+                            Divider()
+                            Button(onClick = { prefOpen = true }) { Text("Personalització") }
+                            OutlinedButton(onClick = { IosNativeBridge.current?.showNotificationSettings() }) {
+                                Text("Configurar notificacions d'iPhone")
+                            }
+                            Text("Versió iOS en migració · L'Agenda KMP", color = Color.Gray, fontSize = 12.sp)
                         }
                     }
                 }
             }
-            if (tab != "Perfil") Row(Modifier.fillMaxWidth().height(62.dp).background(Color(0xFFF1F1F1))
+            Row(Modifier.fillMaxWidth().height(62.dp).background(Color(0xFFF1F1F1))
                 .padding(horizontal = 7.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 listOf("Inici" to "home", "Guardats" to "bookmark", "Entrades" to "ticket",
                     "Comunitat" to "people").forEach { (name, symbol) ->
@@ -1699,96 +1712,37 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         if (registrationOpen) RegistrationDialog(onDismiss = { registrationOpen = false }, onSubmit = { username, email, password ->
             work {
                 account = api.registerAccount(username, email, password)
-                stageGuestFollows(account!!.id)
-                stageGuestFirstRunPlaces(account!!.id)
-                profileSettings = null
-                user = IosUserState(follows = guestFollowTransfer.preview(account!!.id, emptyList())); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null
+                serverState = null
+                user = IosUserState(); artistBells = emptyMap(); tickets = emptyList(); ticketsOffline = false; ticketLoadNotice = ""
+                        notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList(); searchTown = ""; searchCategory = ""; searchComarca = ""; searchStyle = ""; searchRadius = 0; searchFromDate = ""; searchToDate = ""; searchMonth = ""; searchPriceLimit = null; searchFreeOnly = false; searchCategories = emptySet(); searchPresetRevision += 1; searchPresetSaving = false; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null; newSearchName = ""
                 useAccountPreferences(account?.id)
                 registrationOpen = false; loginOpen = false; status = "Compte creat"
                 loadAccountPages()
                 myProfile = runCatching { api.myPublicProfile() }.getOrNull()
             }
         })
-        if (searchFiltersOpen && tab == "Inici") {
-            IosSearchFilterSheet(
-                initial = effectiveSearchFilters,
-                today = today,
-                categories = categoriesForSearch,
-                availablePresets = searchPresets,
-                isSignedIn = account != null,
-                onDismiss = { searchFiltersOpen = false },
-                onClear = {
-                    chooseFeedMode("Per a tu")
-                    searchFiltersOpen = false
-                },
-                onApply = { criteria ->
-                    if (criteria.valid()) {
-                        val currentQuery = query.trim()
-                        val currentSuggestion = chosenSuggestion
-                        chooseFeedMode(if (criteria.isActive || currentQuery.isNotBlank()) "Sense filtre" else "Per a tu")
-                        appliedSearchFilters = criteria.copy(referenceTowns = chosenTowns)
-                        query = currentQuery; appliedQuery = currentQuery
-                        chosenSuggestion = currentSuggestion; appliedSuggestion = currentSuggestion
-                        limit = 5; searchFiltersOpen = false
-                    }
-                },
-                onLoadPreset = { saved ->
-                    if (applyNamedPreset(saved)) searchFiltersOpen = false
-                },
-                onSavedPreset = { name, filters ->
-                    if (applyNamedPreset(IosSavedSearch(name, filters))) searchFiltersOpen = false
-                },
-                onSave = { name, criteria ->
-                    val expectedUser = account?.id ?: error("Inicia sessió abans de guardar filtres.")
-                    api.saveSearchFilters(name, criteria)
-                    if (account?.id == expectedUser) runCatching { api.savedSearches() }
-                        .onSuccess { searchPresets = it }
-                        .onFailure { status = "Filtres guardats, però no es pot actualitzar la llista" }
-                },
-                onDeletePreset = { name ->
-                    val expectedUser = account?.id ?: error("Inicia sessió abans d'eliminar filtres.")
-                    api.removeSavedSearch(name)
-                    if (account?.id == expectedUser) runCatching { api.savedSearches() }
-                        .onSuccess { searchPresets = it }
-                        .onFailure { status = "Filtres eliminats, però no es pot actualitzar la llista" }
-                }
-            )
-        }
-        if (publisherOpen) IosPublisherMenuSheet(
-            policy = IosPublisherMenuPolicy.menu(publisherRole, publisherOwnEvents.any { it.status.equals("published",true) }, publisherSuspended),
-            loading = publisherLoading, warning = publisherWarning,
-            onAction = { action ->
-                publisherOpen = false
-                publisherDestination = action
-            },
-            onProfessionalRequest = {
-                publisherOpen = false
-                if (account == null) loginOpen = true else publisherRequestOpen = true
-            },
-            onDismiss = { publisherOpen = false }
-        )
-        if (publisherRequestOpen && account != null) IosProfessionalRequestSheet(
-            api = api,
-            artists = available.flatMap { it.artists + it.schedule.map { entry -> entry.artist } }
-                .filter(String::isNotBlank).distinct().sorted(),
-            onDismiss = { publisherRequestOpen = false }
-        )
-        publisherDestination?.let { destination ->
-            IosPublisherPendingDestination(destination, onDismiss = { publisherDestination = null })
-        }
         if (loginOpen) LoginDialog(onDismiss = { loginOpen = false }, onSocial = { provider ->
             sessionBridge?.beginSocialSignIn(provider, object : IosSocialAuthCallback {
                 override fun onComplete(idToken: String, nonce: String, authError: String) {
                     if (authError.isNotBlank()) { error = authError; return }
+                    // A cancelled login dialog must not complete into an unrelated session.
+                    if (!loginOpen || account != null) return
                     work {
+                        check(loginOpen && account == null) { "La sessió ha canviat; repetix l'accés." }
                         val next = api.signInWithProvider(provider, idToken, nonce)
+                        // A late provider response must not silently sign in after dismissal.
+                        if (!loginOpen) { api.signOutSecurely(); return@work }
                         account = next
-                        stageGuestFollows(next.id)
-                        stageGuestFirstRunPlaces(next.id)
-                        profileSettings = null
-                        user = IosUserState(follows = guestFollowTransfer.preview(next.id, emptyList())); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList()
-                        groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null
-                        myProfile = null; useAccountPreferences(next.id)
+                        serverState = null
+                        user = IosUserState(); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList()
+                        groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList()
+                        searchTown = ""; searchCategory = ""; searchComarca = ""; searchStyle = ""
+                        searchRadius = 0; searchFromDate = ""; searchToDate = ""; searchMonth = ""
+                        searchPriceLimit = null; searchFreeOnly = false; searchCategories = emptySet()
+                        searchPresetRevision += 1; searchPresetSaving = false
+                        appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""
+                        appliedSuggestion = null; chosenSuggestion = null; newSearchName = ""
+                        myProfile = null; guestReadyUserId = null; useAccountPreferences(next.id)
                         loginOpen = false; status = "Sessió iniciada amb $provider"
                         loadAccountPages()
                         runCatching { myProfile = api.myPublicProfile() }
@@ -1802,210 +1756,88 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         }, onSubmit = { login, password ->
             work {
                 account = api.signIn(login, password)
-                stageGuestFollows(account!!.id)
-                stageGuestFirstRunPlaces(account!!.id)
-                profileSettings = null
-                user = IosUserState(follows = guestFollowTransfer.preview(account!!.id, emptyList())); artistBells = emptyMap(); tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap(); savedLists = emptyList(); searchPresets = emptyList(); activeFilterPresetName = null; selectedFeedCategory = null; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null
+                serverState = null
+                user = IosUserState(); artistBells = emptyMap(); tickets = emptyList(); ticketsOffline = false; ticketLoadNotice = ""
+                        notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); savedLists = emptyList(); searchPresets = emptyList(); searchTown = ""; searchCategory = ""; searchComarca = ""; searchStyle = ""; searchRadius = 0; searchFromDate = ""; searchToDate = ""; searchMonth = ""; searchPriceLimit = null; searchFreeOnly = false; searchCategories = emptySet(); searchPresetRevision += 1; searchPresetSaving = false; appliedSearchFilters = IosSearchFilters(); appliedQuery = ""; query = ""; appliedSuggestion = null; chosenSuggestion = null; newSearchName = ""
                 useAccountPreferences(account?.id)
                 loginOpen = false; status = "Sessió iniciada"
                 loadAccountPages()
                 myProfile = runCatching { api.myPublicProfile() }.getOrNull()
             }
         })
-        if (prefOpen && account != null && (prefSyncPending || prefSyncError.isNotBlank())) {
-            AlertDialog(
-                onDismissRequest = { prefOpen = false },
-                title = { Text("Sincronització de Personalització") },
-                text = { Text(if (prefSyncPending) "Recuperant les seleccions del compte…" else
-                    "${prefSyncError.trim()} Les preferències locals poden ser diferents d'Android.") },
-                confirmButton = {
-                    if (!prefSyncPending) TextButton(onClick = {
-                        prefSyncError = ""; prefSyncPending = true; prefRefreshEpoch++
-                    }) { Text("Reintentar") }
-                },
-                dismissButton = {
-                    TextButton(onClick = {
-                        if (prefSyncPending) prefOpen = false
-                        else prefSyncError = "" // Explicitly allow an offline-local view.
-                    }) { Text(if (prefSyncPending) "Tancar" else "Veure dades locals") }
-                }
-            )
-        }
-        if (prefOpen && !prefSyncPending && prefSyncError.isBlank()) IosPersonalizationScreen(
-            categories = chosenCategories, towns = chosenTowns,
-            hiddenEventIds = excludedEventIds, hiddenArtists = excludedArtists,
-            hiddenCategories = excludedCategories, events = available,
-            townOptions = events.map { it.town }.filter(String::isNotBlank).distinct().sorted(),
-            subcategories = chosenSubcategories, comarques = chosenComarques,
-            radii = chosenRadii, suggestions = showSuggestions,
-            discovery = discoveryLevel, valencian = valencianFirst,
-            artistFollows = user.follows.filter { it.type.equals("ARTIST",true) }.map { it.label }.toSet(),
-            categoryFollows = user.follows.filter { it.type.equals("CATEGORY",true) }.map { it.key }.toSet(),
-            alertedArtists = artistBells.values.filter { it.enabled }.map { it.artistName }.toSet(),
-            accountSignedIn = account != null,
-            entityImages = remember(personalizationImagesRevision,entityStyles) {
-                IosPersonalizationImages.cached()
-            },
-            notificationsEnabled = personalizationPushEnabled,
-            onNotificationsEnabled = { enable ->
-                if (!enable) {
-                    personalizationPushEnabled = false
-                    platformWritePublicCache(iosScopedCacheKey("pref_ios_push", account?.id), "false")
-                    sessionBridge?.showNotificationSettings()
+        if (prefOpen) PersonalizationDialog(chosenCategories, chosenTowns, excludedEventIds, excludedArtists,
+            excludedCategories, available, IosCategoryTaxonomy.categories.map { it.key },
+            events.map { it.town }.filter(String::isNotBlank).distinct().sorted(),
+            chosenSubcategories, chosenComarques, chosenRadii, showSuggestions,discoveryLevel,valencianFirst,
+            uiLanguage, onDismiss = { prefOpen = false }, onSave = { cats, towns, hiddenEvents, hiddenArtists, hiddenCategories,
+                styles,comarques,radii,suggestions,discovery,valencian,language ->
+                val expectedId = account?.id ?: guestReadyUserId
+                val username = account?.username?.trim()?.lowercase()?.takeIf(String::isNotBlank) ?: "guest"
+                if (expectedId == null) {
+                    error = "Cal identificar l'usuari al servidor abans de guardar."
                 } else {
-                    val accountAtRequest = account?.id
-                    sessionBridge?.requestRemoteNotifications(object : IosReminderSchedulingCallback {
-                        override fun onResult(success: Boolean, message: String) {
-                            if (account?.id != accountAtRequest) return
-                            if (success) {
-                                personalizationPushEnabled = true
-                                platformWritePublicCache(iosScopedCacheKey("pref_ios_push",accountAtRequest), "true")
-                                status = "Permís de notificacions acceptat"
-                            } else {
-                                personalizationPushEnabled = false
-                                error = "No s'han pogut activar els avisos iOS: $message"
+                    // Protect the current edit against older parallel server refreshes.
+                    locationEditRevision += 1
+                    feedEditRevision += 1
+                    work {
+                    val normalizedLocations = IosLocationRules.prepare(towns, comarques, radii)
+                    val savedTowns = normalizedLocations.towns.keys
+                    val savedComarques = normalizedLocations.comarques
+                    val savedRadii = normalizedLocations.towns
+                    // Dedicated domains first; do not mark UI saved until ALL calls succeed.
+                    api.saveLocationPreferences(expectedId, savedTowns, savedComarques, savedRadii)
+                    api.saveFeedPreferences(expectedId, suggestions, discovery.name, valencian)
+                    api.savePersonalState(expectedId, mapOf(
+                        "preferred_locations_$username" to IosPersonalEncoded.strings(savedTowns),
+                        "preferred_comarques_$username" to IosPersonalEncoded.strings(savedComarques),
+                        "preferred_location_radii_$username" to IosPersonalEncoded.string(
+                            kotlinx.serialization.json.buildJsonObject {
+                                savedRadii.forEach { (town, radius) -> put(town, kotlinx.serialization.json.JsonPrimitive(radius)) }
+                            }.toString()),
+                        "show_suggestions" to IosPersonalEncoded.bool(suggestions),
+                        "discovery_level" to IosPersonalEncoded.string(discovery.name),
+                        "valencian_first" to IosPersonalEncoded.bool(valencian),
+                        // Android UiLanguageStore writes exactly this key to sync/state.php.
+                        IosFeedPreferencesContract.centralUiLanguageKey to IosPersonalEncoded.string(language.code)
+                    ))
+                    val exclusionsPending = api.updateVisibility(expectedId,
+                        IosVisibilitySnapshot(excludedEventIds, excludedArtists, excludedCategories),
+                        IosVisibilitySnapshot(hiddenEvents, hiddenArtists, hiddenCategories))
+                    visibilityEditRevision += 1
+                    // Pas 7: MAIN and SUBCATEGORY share the *same* Android CATEGORY follows.
+                    // Never compare entity_label; only exact entity_key (legacy aliases are removed).
+                    val hiddenMain = hiddenCategories.mapNotNull(IosCategoryTaxonomy::mainKey).toSet()
+                    val hiddenSub = hiddenCategories.mapNotNull(IosCategoryTaxonomy::subcategoryCode).toSet()
+                    val desiredCategoryFollows = IosCategoryTaxonomy.normalized(
+                        cats - hiddenMain,
+                        styles.filterNot { child ->
+                            val canonical = IosCategoryTaxonomy.subcategoryCode(child)
+                            canonical in hiddenSub || hiddenMain.any { main ->
+                                IosCategoryTaxonomy.childrenOf(main).any { it.code == canonical }
                             }
-                        }
-                    }) ?: run { error = "No hi ha disponible el pont de notificacions d'iOS." }
-                }
-            },
-            onFollowArtist = { name -> toggleFollow(name) },
-            onArtistAlerts = { name, enabled ->
-                val id = account?.id
-                if (id == null) loginOpen = true else work {
-                    val old = artistBells[IosArtistBellPolicy.key(name)]
-                    runCatching { api.saveArtistBell(name,enabled,old?.frequency ?: "WEEKLY") }
-                        .onSuccess { saved ->
-                            if (account?.id == id) {
-                                artistBells = IosArtistBellPolicy.update(artistBells,saved)
-                                status = if (enabled) "Avisos de $name activats" else "Avisos desactivats"
-                            }
-                        }.onFailure { error = "No s'ha guardat la campaneta: ${it.message.orEmpty()}" }
-                }
-            },
-            onResetLearning = {
-                val id = account?.id
-                platformWritePublicCache(iosScopedCacheKey("recent_styles",id), "")
-                // Invalidate the personalized feed immediately. Preserve explicit follows, places and blocks.
-                platformWritePublicCache("for_you_${id ?: "guest"}_signature", "")
-                learningResetRevision += 1
-                status = "Gustos apresos reiniciats en este dispositiu"
-                if (id != null) work {
-                    runCatching { api.resetLearnedPersonalization() }
-                        .onFailure { error = "Reinici local fet. El servidor no ha confirmat el reinici: ${it.message.orEmpty()}" }
-                }
-            },
-            onDismiss = { prefOpen = false },
-            onSave = { cats, towns, hiddenEvents, hiddenArtists, hiddenCategories,
-                styles, comarques, radii, suggestions, discovery, valencian ->
-                val accountId = account?.id
-                // Precisely the follow keys used by Android: main codes and 55 subcategory codes.
-                val nextKeys = (cats + styles).filter { key ->
-                    key in IosPersonalizationTaxonomy.categories.map { it.code } ||
-                        key == "CHILDREN" ||
-                        IosPersonalizationTaxonomy.subcategories.any { it.code == key }
-                }.toSet()
-                val oldHiddenEvents = excludedEventIds
-                val oldHiddenArtists = excludedArtists
-                val oldHiddenCategories = excludedCategories
-                val visibilityChanged = oldHiddenEvents != hiddenEvents || oldHiddenArtists != hiddenArtists ||
-                    oldHiddenCategories != hiddenCategories
-                if (visibilityChanged) visibilityWriteRevision += 1
-                val categoriesChanged = cats != chosenCategories || styles != chosenSubcategories
-                val placesChanged = towns != chosenTowns || comarques != chosenComarques || radii != chosenRadii
-                chosenCategories = cats; chosenTowns = towns
-                chosenSubcategories = styles; chosenComarques = comarques; chosenRadii = radii
-                if (placesChanged) placesWriteRevision += 1
-                val feedPrefsChanged = showSuggestions != suggestions || discoveryLevel != discovery || valencianFirst != valencian
-                if (feedPrefsChanged) feedPrefsWriteRevision += 1
-                showSuggestions = suggestions; discoveryLevel = discovery; valencianFirst = valencian
-                saveExclusions(hiddenEvents, hiddenArtists, hiddenCategories)
-                if (accountId != null && visibilityChanged) {
-                    val revision = visibilityWriteRevision
-                    val dirtyKey = iosScopedCacheKey("pref_visibility_dirty",accountId)
-                    platformWritePublicCache(dirtyKey,"true")
-                    val ops = mutableListOf<Triple<String,String,Boolean>>()
-                    fun delta(kind:String,old:Set<String>,next:Set<String>) {
-                        (old - next).forEach { ops += Triple(kind,it,false) }
-                        (next - old).forEach { ops += Triple(kind,it,true) }
+                        }.toSet())
+                    for (change in IosCategoryTaxonomy.mutations(user.follows, desiredCategoryFollows)) {
+                        api.followEntity("CATEGORY", change.key, change.label, change.following)
                     }
-                    delta("EVENT",oldHiddenEvents.map(Int::toString).toSet(),hiddenEvents.map(Int::toString).toSet())
-                    delta("ARTIST",oldHiddenArtists,hiddenArtists)
-                    delta("CATEGORY",oldHiddenCategories,hiddenCategories)
-                    work {
-                        var failures = 0
-                        for ((kind,target,hide) in ops) {
-                            runCatching { api.changeVisibility(kind,target,hide) }.onFailure { failures++ }
-                        }
-                        if (account?.id == accountId && revision == visibilityWriteRevision && failures == 0)
-                            platformWritePublicCache(dirtyKey,"false")
-                        if (failures > 0) error = "${failures} bloquejos no s'han sincronitzat. S'han guardat a iPhone."
+                    check((account?.id ?: guestReadyUserId) == expectedId) { "Ha canviat la sessió" }
+                    chosenCategories = desiredCategoryFollows.categories; chosenTowns = savedTowns
+                    chosenSubcategories = desiredCategoryFollows.subcategories
+                    chosenComarques = savedComarques; chosenRadii = savedRadii
+                    showSuggestions = suggestions; discoveryLevel = discovery; valencianFirst = valencian
+                    uiLanguage = language
+                    val visibilityNow = api.visibility()
+                    excludedEventIds = visibilityNow.events; excludedArtists = visibilityNow.artists
+                    excludedCategories = visibilityNow.categories
+                    user = api.userState()
+                    val confirmedCategories = IosCategoryTaxonomy.fromServer(user.follows)
+                    chosenCategories = confirmedCategories.categories
+                    chosenSubcategories = confirmedCategories.subcategories
+                    serverStateRefreshEpoch += 1
+                    prefOpen = false
+                    status = if (exclusionsPending) "Preferències pendents de sincronització" else "Preferències guardades al servidor"
                     }
                 }
-                if (accountId != null && categoriesChanged) {
-                    categoryWriteRevision += 1
-                    platformWritePublicCache(iosScopedCacheKey("pref_categories_dirty",accountId),"true")
-                }
-                platformWritePublicCache(iosScopedCacheKey("pref_categories",accountId), IosAccountCachePolicy.encode(cats))
-                platformWritePublicCache(iosScopedCacheKey("pref_towns",accountId), IosAccountCachePolicy.encode(towns))
-                platformWritePublicCache(iosScopedCacheKey("pref_subcategories",accountId), IosAccountCachePolicy.encode(styles))
-                platformWritePublicCache(iosScopedCacheKey("pref_comarques",accountId), IosAccountCachePolicy.encode(comarques))
-                platformWritePublicCache(iosScopedCacheKey("pref_radii",accountId), IosAccountCachePolicy.encode(IosPersonalFeedPolicy.encodeRadii(radii)))
-                platformWritePublicCache(iosScopedCacheKey("pref_suggestions",accountId),suggestions.toString())
-                platformWritePublicCache(iosScopedCacheKey("pref_discovery",accountId),discovery.name)
-                platformWritePublicCache(iosScopedCacheKey("pref_valencian",accountId),valencian.toString())
-                if (accountId != null && (feedPrefsChanged || platformReadPublicCache(iosScopedCacheKey("pref_feed_dirty", accountId)) == "true")) {
-                    val revision = feedPrefsWriteRevision
-                    val dirtyKey = iosScopedCacheKey("pref_feed_dirty",accountId)
-                    platformWritePublicCache(dirtyKey,"true")
-                    work {
-                        feedPrefsSyncMutex.withLock {
-                            if (account?.id != accountId) return@withLock
-                            // Always persist the latest draft, not an earlier rapid tap's payload.
-                            val latestRevision = feedPrefsWriteRevision
-                            runCatching { api.saveFeedPreferences(showSuggestions,discoveryLevel.name,valencianFirst) }
-                                .onSuccess { if (account?.id == accountId && latestRevision == feedPrefsWriteRevision) {
-                                    platformWritePublicCache(dirtyKey,"false")
-                                    feedPrefsServerRevision += 1
-                                } }
-                                .onFailure { if (account?.id == accountId)
-                                    error = "Preferències de Per a tu guardades en iPhone, pendents de servidor: ${it.message.orEmpty()}" }
-                        }
-                    }
-                }
-                if (accountId != null && placesChanged) {
-                    val revision = placesWriteRevision
-                    val dirtyKey = iosScopedCacheKey("pref_places_dirty",accountId)
-                    platformWritePublicCache(dirtyKey,"true")
-                    work {
-                        runCatching { api.saveLocationPreferences(towns.associateWith {
-                            radii[it] ?: PersonalizationOptions.defaultRadiusKm
-                        },comarques) }.onSuccess {
-                            if (account?.id == accountId && revision == placesWriteRevision)
-                                platformWritePublicCache(dirtyKey,"false")
-                        }.onFailure { error = "Llocs guardats en iPhone, però falta sincronitzar-los: ${it.message.orEmpty()}" }
-                    }
-                }
-                if (accountId == null) {
-                    val guestWithoutCategories = user.follows.filterNot { it.type.equals("CATEGORY",true) }
-                    val guestCategories = nextKeys.map { key ->
-                        val label = IosPersonalizationTaxonomy.categoryLabel(key).let { if (it == key)
-                            IosPersonalizationTaxonomy.subcategoryLabel(key) else it }
-                        IosFollow("CATEGORY",key,label)
-                    }
-                    val merged = IosGuestFollowTransfer.union(guestWithoutCategories,guestCategories)
-                    guestFollowTransfer.setGuest(merged)
-                    user = user.copy(follows = merged)
-                }
-                if (accountId != null && (categoriesChanged ||
-                    platformReadPublicCache(iosScopedCacheKey("pref_categories_dirty",accountId)) == "true")) work {
-                    // Same server follow.php as Android. Dirty state survives a failed request
-                    // and is retried after the next sign-in or account refresh.
-                    synchronizePendingCategories(accountId)
-                }
-                status = "Preferències actualitzades"
-            }
-        )
+            })
         popupAd?.let { ad ->
             val promotedEvent = eventById[ad.eventId]
             if (promotedEvent != null) {
@@ -2027,69 +1859,102 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                 }
             }
         }
-        if (notificationsOpen) NotificationsDialog(
-            notifications = notices,
-            artistBells = artistBells.values.sortedBy { it.artistName },
-            reminders = events.filter { it.id in user.alerts &&
-                (it.endDate.ifBlank { it.date }.isBlank() || it.endDate.ifBlank { it.date } >= today) },
-            tickets = tickets, suggestions = notificationSuggestions,
-            eventsById = eventById, today = today,accountId=account?.id,api=api,
-            preferences=notificationPreferences,onPreferencesChange={ next ->
-                notificationPreferences=next
-                platformWritePublicCache(iosScopedCacheKey("notification_preferences",account?.id),next.encode())
-            },readLocalIds=readLocalNotifications,dismissedIds=dismissedLocalNotifications,
-            onReadLocal=::markLocalNotificationRead,
-            onDismissAll={ keys ->
-                dismissedLocalNotifications=dismissedLocalNotifications+keys
-                readLocalNotifications=readLocalNotifications+keys
-                platformWritePublicCache(iosScopedCacheKey("notification_dismissed",account?.id),
-                    IosAccountCachePolicy.encode(dismissedLocalNotifications))
-                platformWritePublicCache(iosScopedCacheKey("notification_read",account?.id),
-                    IosAccountCachePolicy.encode(readLocalNotifications))
-                val pending=notices.filter{ "server:${it.id}" in keys && !it.read }
-                if(pending.isNotEmpty()) work {
-                    pending.forEach { runCatching { api.markRead(it.id) } }
-                    notices=notices.map { notice -> if(notice in pending) notice.copy(read=true) else notice }
+        LaunchedEffect(notificationsOpen, account?.id, guestReadyUserId) {
+            if (!notificationsOpen) return@LaunchedEffect
+            val owner = account?.id ?: guestReadyUserId ?: return@LaunchedEffect
+            val before = notificationSettingsRevision
+            runCatching { api.notificationCenterSettings(owner) }.onSuccess { loaded ->
+                if (notificationsOpen && (account?.id ?: guestReadyUserId) == owner &&
+                    before == notificationSettingsRevision &&
+                    runCatching { api.hasPendingNotificationSettingsWrites(owner) }.getOrDefault(true).not()) {
+                    notificationSettings = loaded
+                    notificationSettingsLoadedOwner = owner
+                    IosNativeBridge.current?.setPushDeliveryEnabled(loaded.pushEnabled)
                 }
-            },onDismiss={notificationsOpen=false},
-            onRead={notice ->
-                work { runCatching { api.markRead(notice.id) }.onSuccess {
-                    notices=notices.map { if(it.id==notice.id) it.copy(read=true) else it }
-                }.onFailure { error="No s'ha pogut marcar com a llegida: ${it.message.orEmpty()}" } }
-                when(notice.linkType.uppercase()) {
-                    "EVENT", "EVENT_ID", "EVENT_DETAIL", "UPCOMING", "UPCOMING_EVENT", "EVENT_REMINDER", "REMINDER",
-                    "NEW_EVENT", "SUGGESTION", "SUGGESTED_EVENT", "RECOMMENDATION" -> notice.linkValue.toIntOrNull()?.let { id ->
-                        eventById[id]?.let { notificationsOpen=false;showEvent(it) }
-                    }
-                    "TICKET", "TICKETS", "TICKET_ID", "ORDER", "TICKET_ORDER" -> {notificationsOpen=false;tab="Entrades"}
-                    "COMMUNITY", "COMMUNITY_GROUP", "COMMUNITY_MESSAGE", "BOARD" -> {notificationsOpen=false;tab="Comunitat"}
-                    "ARTIST", "NEW_ARTIST_EVENT", "FOLLOWED_ARTIST_NEW" -> if(notice.linkValue.isNotBlank()) {
-                        notificationsOpen=false;artistSourceEvent=null;artist=notice.linkValue
-                    }
+            }
+            // Guests and registered users each have their own server inbox.
+            runCatching { api.notifications() }.onSuccess { fresh ->
+                if (notificationsOpen && (account?.id ?: guestReadyUserId) == owner) notices = fresh
+            }
+        }
+        if (notificationsOpen) NotificationsDialog(notices, artistBells.values.sortedBy { it.artistName }, eventsById = eventById, onDismiss = { notificationsOpen = false }, onRead = { notice ->
+            work { api.markRead(notice.id); notices = notices.map { if (it.id == notice.id) it.copy(read = true) else it } }
+            when (notice.linkType.uppercase()) {
+                "EVENT", "EVENT_ID", "EVENT_DETAIL" -> notice.linkValue.toIntOrNull()?.let { id ->
+                    eventById[id]?.let { notificationsOpen = false; showEvent(it) }
                 }
-            },onReminderClick={ev->notificationsOpen=false;showEvent(ev)},
-            onReminderDisable={ev->notificationsOpen=false;alertToDisable=ev},
-            onArtistBell={name->notificationsOpen=false;artistBellEditing=name},
-            onOpenArtist={name->notificationsOpen=false;artistSourceEvent=null;artist=name},
-            onArtistDisable={name->
-                val existing=artistBells[IosArtistBellPolicy.key(name)]
-                if(existing!=null) work {
-                    runCatching { api.saveArtistBell(name,false,existing.frequency) }
-                        .onSuccess { artistBells=artistBells-IosArtistBellPolicy.key(name);status="Campaneta desactivada" }
-                        .onFailure { error="No s'ha pogut desactivar: ${it.message.orEmpty()}" }
+                "TICKETS", "TICKET" -> { notificationsOpen = false; tab = "Entrades" }
+                "COMMUNITY" -> { notificationsOpen = false; tab = "Comunitat" }
+                "ARTIST", "NEW_ARTIST_EVENT" -> { if (notice.linkValue.isNotBlank()) {
+                    notificationsOpen = false; artistSourceEvent = null; artist = notice.linkValue
+                } }
+            }
+        }, reminders = events.filter { it.id in user.alerts && (it.endDate.ifBlank { it.date }.isBlank() || it.endDate.ifBlank { it.date } >= today) },
+            onReminderClick = { ev -> notificationsOpen = false; showEvent(ev) },
+            onReminderDisable = { ev -> notificationsOpen = false; alertToDisable = ev },
+            onArtistBell = { name -> notificationsOpen = false; artistBellEditing = name },
+            reminderTime = { ev -> remoteReminderTime(ev.id) },
+            settings = notificationSettings,
+            isRegistered = account != null,
+            savingSettings = notificationSettingsBusy,
+            onSaveSettings = { draft ->
+                val owner = account?.id ?: guestReadyUserId
+                if (owner != null && notificationSettingsLoadedOwner != owner) {
+                    error = "Cal recuperar la configuració del servidor abans de modificar-la."
+                } else if (owner != null && !notificationSettingsBusy) {
+                    notificationSettingsBusy = true
+                    work {
+                        try {
+                            val pending = api.saveNotificationCenterSettings(owner, draft)
+                            if ((account?.id ?: guestReadyUserId) == owner) {
+                                notificationSettings = draft
+                                notificationSettingsRevision += 1
+                                IosNativeBridge.current?.setPushDeliveryEnabled(draft.pushEnabled)
+                                if (draft.pushEnabled) IosNativeBridge.current?.requestRemoteNotifications(object : IosReminderSchedulingCallback {
+                                    override fun onResult(success: Boolean, message: String) {
+                                        if (!success) status = "Preferència guardada; permisos push no concedits"
+                                    }
+                                })
+                                status = if (pending) "Preferències pendents de sincronitzar" else "Configuració guardada al servidor"
+                            }
+                        } catch (pending: IosQueuedForRetryException) {
+                            if ((account?.id ?: guestReadyUserId) == owner) {
+                                // Only persisted encrypted mutations can be projected in RAM.
+                                notificationSettings = draft
+                                notificationSettingsRevision += 1
+                                IosNativeBridge.current?.setPushDeliveryEnabled(draft.pushEnabled)
+                                status = "Preferències pendents de sincronitzar amb el servidor"
+                            }
+                        } finally { notificationSettingsBusy = false }
+                    }
                 }
             },
-            onOpenTickets={notificationsOpen=false;tab="Entrades"},
-            onOpenSuggestion={ev->notificationsOpen=false;showEvent(ev)},
-            reminderTime={ev->account?.id?.let{id->platformReadPublicCache(iosReminderKey(id,ev.id))}.orEmpty()},
-            entries=notificationEntries)
-        val openedBatecGroup = followedGroups.firstOrNull { it.key == batecStoryKey }
-        if (batecStoryKey != null && openedBatecGroup != null) {
+            onClearRead = { 
+                val owner = account?.id ?: guestReadyUserId
+                if (owner != null) work {
+                    val unread = notices.filter { !it.read }
+                    for (notice in unread) {
+                        if ((account?.id ?: guestReadyUserId) != owner) break
+                        api.markRead(notice.id)
+                    }
+                    if ((account?.id ?: guestReadyUserId) == owner) notices = api.notifications()
+                }
+            },
+            onOpenNativeSettings = { IosNativeBridge.current?.showNotificationSettings() })
+        val batecViewerUserId = account?.id ?: guestReadyUserId
+        val openedBatecGroup = batecViewerGroups.firstOrNull { it.key == batecStoryKey }
+        // Never show a previous account's snapshot after a sign-out/sign-in or guest claim.
+        if (batecStoryKey != null && batecViewerOwnerId != batecViewerUserId) {
+            LaunchedEffect(batecViewerUserId, batecStoryKey) { closeBatecs() }
+        }
+        if (batecStoryKey != null && openedBatecGroup != null && batecViewerOwnerId == batecViewerUserId) {
             BatecViewer(
-                groups = followedGroups,
+                groups = batecViewerGroups,
                 selectedKey = openedBatecGroup.key,
-                stories = activeBatecs,
+                stories = batecViewerStories,
                 allEvents = available,
+                isFollowed = { artist -> user.followsType("ARTIST", resolvedFollowKey("ARTIST", artist)) },
+                onToggleFollow = { artist -> toggleFollow(artist) },
                 onDismiss = ::closeBatecs,
                 onOpenEvent = { id ->
                     closeBatecs()
@@ -2099,19 +1964,29 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             )
             // Mark every actual publication of the artist as seen. A failed request
             // must not invent server state or turn the ring grey optimistically.
-            LaunchedEffect(batecStoryKey, account?.id) {
-                val expectedId = account?.id
-                val group = followedGroups.firstOrNull { it.key == batecStoryKey }
-                if (expectedId != null && group != null) {
-                    val pending = group.storyKeys.filter { it !in seenBatecs &&
-                        IosBatecTimelinePolicy.isServerSeenKey(it) }
+            LaunchedEffect(batecStoryKey, account?.id, guestReadyUserId) {
+                val expectedId = account?.id ?: guestReadyUserId
+                val group = batecViewerGroups.firstOrNull { it.key == batecStoryKey }
+                if (expectedId != null && expectedId == batecViewerOwnerId && group != null) {
+                    val pending = group.storyKeys.filter { key ->
+                        val seenKey = IosBatecArtistGroups.canonicalSeenKey(key)
+                        seenKey !in seenBatecs && batecViewerStories.any {
+                            it.storyKey == key && it.sourceType in setOf("MANUAL", "AUTO_EVENT")
+                        }
+                    }
                     // This job belongs to the screen, not to the current story:
                     // a quick swipe must not cancel marking the previous group.
                     scope.launch {
                         pending.forEach { key ->
-                            if (account?.id != expectedId) return@launch
+                            if ((account?.id ?: guestReadyUserId) != expectedId) return@launch
                             runCatching { api.markBatecSeen(key) }.onSuccess {
-                                if (account?.id == expectedId) seenBatecs = seenBatecs + key
+                                if ((account?.id ?: guestReadyUserId) == expectedId) seenBatecs = seenBatecs +
+                                    IosBatecArtistGroups.canonicalSeenKey(key)
+                            }.onFailure { ex ->
+                                if (ex is IosQueuedForRetryException && (account?.id ?: guestReadyUserId) == expectedId) {
+                                    // Show as viewed locally while the encrypted queue waits for confirmation.
+                                    seenBatecs = seenBatecs + IosBatecArtistGroups.canonicalSeenKey(key)
+                                }
                             }
                         }
                     }
@@ -2120,29 +1995,51 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
         }
         selected?.let { ev -> EventDetailSheet(ev, user.saved.contains(ev.id), user.alerts.contains(ev.id),
             matchedArtist = festivalMatchedArtist,
-            followsEntity = { type, name -> user.followsType(type, name) },
+            followsEntity = { type, name -> user.followsType(type, resolvedFollowKey(type, name)) },
             onToggleFollowEntity = { type, name -> toggleFollowEntity(type, name) },
             onDismiss = { selected = null; festivalMatchedArtist = ""; savedFestivalRevision++ },
             onSave = { toggleSaved(ev) }, onReminder = { if (ev.id in user.alerts) alertToDisable = ev else reminderToSchedule = ev },
-            userId = account?.id, onReport = { selected = null; reportEvent = ev },
+            userId = account?.id ?: guestReadyUserId,
+            serverSlots = (account?.id ?: guestReadyUserId)?.let { ownerId ->
+                festivalSlotOverrides[ownerId to ev.id] ?: serverState?.personalFestivalSlots(ev.id)
+            },
+            saveFestivalSlots = { newSlots ->
+                val ownerId = account?.id ?: guestReadyUserId ?: throw IllegalStateException("Identitat no disponible")
+                updateFestivalSlots(ownerId, ev.id, newSlots)
+            },
+            onReport = { selected = null; reportEvent = ev },
+            batecApi = api, canPublishBatec = account != null,
+            onBatecsChanged = { batecsRefreshEpoch += 1 },
+            onBatecSignIn = { selected = null; loginOpen = true },
             loadSchedule = api::festivalSchedule,
             onArtist = { artistSourceEvent = ev; selected = null; artist = it }, onCommunity = {
+                // A guest is a real server user. Never demand a registered account to browse boards.
                 selected = null
-                val requestedId = account?.id
-                tab = "Comunitat"
-                work {
-                    val loaded = if (requestedId == null) api.publicCommunityGroups(ev.id) else api.community(ev.id)
-                    if (account?.id == requestedId) groups = loaded
-                }
+                work { groups = api.community(ev.id); tab = "Comunitat" }
+            }, onOpenCommunityGroup = { group ->
+                selected = null
+                communityGroup = group
             }, onCreateGroup = {
-                if (account == null) loginOpen = true else { selected = null; groupCreateFor = ev }
+                if ((account?.id ?: guestReadyUserId) == null) {
+                    status = "Cal establir la connexió del convidat abans de crear un tauló."
+                } else { selected = null; groupCreateFor = ev }
             }, onTickets = {
-                if (ev.ticketUrl.startsWith("https://")) platformOpenExternal(ev.ticketUrl)
-                else if (ev.ticketAvailable) {
+                if (IosEventDetailContract.isSafeExternalTicketUrl(ev.ticketUrl)) platformOpenExternal(ev.ticketUrl)
+                else if (ev.ticketAvailable && ev.ticketUrl.isBlank()) {
                     selected = null
-                    ticketEvent = ev // Viewing ticket options is public; reservation requires auth.
+                    if ((account?.id ?: guestReadyUserId) == null) status = "Cal establir la connexió del convidat."
+                    else ticketEvent = ev
                 } else status = "Este esdeveniment no té venda d'entrades disponible."
             }) }
+    // The artist-bell PHP endpoint accepts a server-authenticated guest as well.
+    // Fetch the guest's preferences under their own Bearer, not a previous account's.
+    LaunchedEffect(guestReadyUserId, account?.id) {
+        val guestId = guestReadyUserId?.takeIf { account == null } ?: return@LaunchedEffect
+        val bells = runCatching { api.artistBells() }.getOrNull() ?: return@LaunchedEffect
+        if (account == null && guestReadyUserId == guestId) {
+            artistBells = bells.filter { it.enabled }.associateBy { IosArtistBellPolicy.key(it.artistName) }
+        }
+    }
         artist?.let { value ->
             val matchingEvents = available.filter { e ->
                 e.artists.any { it.equals(value, true) } || e.schedule.any { it.artist.equals(value, true) }
@@ -2150,40 +2047,77 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             // A schedule entry may exist only in the detailed remote festival response,
             // not the abbreviated feed: keep that festival visible in this artist popup.
             val fromFestival = artistSourceEvent?.let { listOf(it) }.orEmpty()
-            ArtistDialog(value, user.follows(value), (fromFestival + matchingEvents).distinctBy { it.key },
+            ArtistDialog(api, value, user.follows(value), (fromFestival + matchingEvents).distinctBy { it.id },
+                onLogin = { artist = null; artistSourceEvent = null; loginOpen = true },
+                onStorePaid = { artistPageRefresh++ },
+                publicPage = artistPublicPage?.takeIf { IosArtistPagePolicy.sameArtist(it.artist, value) },
+                pageLoading = artistPageLoading, pageError = artistPageError,
+                onRetryPage = { artistPageRefresh++ },
                 onFollow = { toggleFollow(value) },
                 bell = artistBells[IosArtistBellPolicy.key(value)],
                 onBell = {
-                    if (account == null) loginOpen = true
+                    val requestedUser = account?.id ?: guestReadyUserId
+                    if (requestedUser == null) status = "Cal establir la identitat del convidat."
                     else {
                         artistBellEditing = value
-                        val requestedUser = account?.id
                         work {
                             val bells = api.artistBells()
-                            if (account?.id == requestedUser) artistBells = bells.filter { b -> b.enabled }
+                            if ((account?.id ?: guestReadyUserId) == requestedUser) artistBells = bells.filter { b -> b.enabled }
                                 .associateBy { b -> IosArtistBellPolicy.key(b.artistName) }
                         }
                     }
                 },
                 onDismiss = { artist = null; artistSourceEvent = null },
-                onEvent = { artist = null; artistSourceEvent = null; showEvent(it, value, true) })
+                onEvent = { artist = null; artistSourceEvent = null; showEvent(it) })
         }
         artistBellEditing?.let { selectedArtist ->
             val existing = artistBells[IosArtistBellPolicy.key(selectedArtist)]
             ArtistBellEditorDialog(selectedArtist, existing,
                 onDismiss = { artistBellEditing = null },
                 onSave = { enabled, frequency ->
-                    val requestUser = account?.id
-                    if (requestUser == null) { artistBellEditing = null; loginOpen = true }
+                    val requestUser = account?.id ?: guestReadyUserId
+                    if (requestUser == null) { status = "Cal establir la identitat del convidat." }
                     else work {
-                        val saved = api.saveArtistBell(selectedArtist, enabled, frequency)
-                        if (account?.id == requestUser) {
+                        var queued = false
+                        val saved = try {
+                            api.saveArtistBell(selectedArtist, enabled, frequency)
+                        } catch (_: IosQueuedForRetryException) {
+                            queued = true
+                            IosArtistBell(selectedArtist, frequency, enabled)
+                        }
+                        if ((account?.id ?: guestReadyUserId) == requestUser) {
                             artistBells = IosArtistBellPolicy.update(artistBells, saved)
                             artistBellEditing = null
-                            status = if (enabled) "Campaneta guardada · ${IosArtistBellPolicy.label(frequency)}" else "Campaneta desactivada"
+                            status = if (queued) "Campaneta pendent de sincronització"
+                                else if (enabled) "Campaneta guardada · ${IosArtistBellPolicy.label(frequency)}"
+                                else "Campaneta desactivada"
                             if (enabled) IosNativeBridge.current?.requestRemoteNotifications(object : IosReminderSchedulingCallback {
-                                override fun onResult(success: Boolean, message: String) { /* Apple controls the permission separately. */ }
+                                override fun onResult(success: Boolean, message: String) { /* Permission is separate from server save. */ }
                             })
+                        }
+                    }
+                })
+        }
+        if (editAccountOpen && account != null) {
+            AccountIdentityIosDialog(account!!, myProfile?.homeTown.orEmpty(),
+                onDismiss = { editAccountOpen = false },
+                onSave = { username, email, town ->
+                    val expectedId = account?.id
+                    val expectedUsername = account?.username
+                    val oldEmail = account?.email.orEmpty()
+                    work {
+                        check(expectedId != null && account?.id == expectedId && account?.username == expectedUsername) {
+                            "La sessió ha canviat abans de guardar el compte"
+                        }
+                        val updated = api.updateMyAccountIdentity(username, email, town)
+                        if (account?.id == expectedId && account?.username == updated.username) {
+                            account = updated
+                            myProfile = runCatching { api.myPublicProfile() }.getOrNull()
+                                ?.copy(homeTown = town.trim())
+                            editAccountOpen = false
+                            serverStateRefreshEpoch += 1
+                            status = if (!oldEmail.equals(updated.email, ignoreCase = true)) "Compte actualitzat. Revisa el correu de verificació si cal."
+                                else "Dades del compte actualitzades al servidor"
                         }
                     }
                 })
@@ -2195,7 +2129,8 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                     val newSettings = api.saveProfileSettings(role, phone)
                     if (expectedId != null && account?.id == expectedId) {
                         profileSettings = newSettings
-                        account = account?.copy(role = newSettings.role)
+                        // Profile settings do not grant verified publisher authorization.
+                        serverPublisherAccess = runCatching { api.publisherSnapshot() }.getOrNull()
                         profileSettingsOpen = false
                         status = "Perfil actualitzat"
                     }
@@ -2206,13 +2141,22 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             ProfileEditIosDialog(myProfile ?: IosMyProfile(account?.username.orEmpty(), "", ""),
                 onDismiss = { editProfileOpen = false },
                 onPickImage = {
+                    val selectedForId = account?.id
+                    val selectedForUsername = account?.username
                     sessionBridge?.pickProfilePhoto(object : IosPickedPhotoCallback {
                         override fun onComplete(base64Jpeg: String, imageError: String) {
                             if (imageError.isNotBlank()) { error = imageError; return }
-                            val expectedId = account?.id
+                            if (selectedForId == null || account?.id != selectedForId ||
+                                account?.username != selectedForUsername) {
+                                error = "La sessió ha canviat: no s'ha enviat la fotografia"
+                                return
+                            }
                             work {
+                                check(account?.id == selectedForId && account?.username == selectedForUsername) {
+                                    "Compte canviat abans d'enviar la foto"
+                                }
                                 val url = api.uploadMyPhoto(base64Jpeg)
-                                if (expectedId != null && account?.id == expectedId) {
+                                if (account?.id == selectedForId && account?.username == selectedForUsername) {
                                     myProfile = (myProfile ?: IosMyProfile("", "", "")).copy(photoUrl = url)
                                     status = "Foto guardada al servidor"
                                 }
@@ -2220,11 +2164,21 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                         }
                     }) ?: run { error = "El selector de fotografies no està disponible." }
                 },
-                onSave = { name, bio, remove ->
+                onSave = { updated, remove ->
                     val expectedId = account?.id
+                    val expectedUsername = account?.username
                     work {
-                        val saved = api.updateMyPublicProfile(name, bio, remove)
-                        if (account?.id == expectedId) { myProfile = saved; editProfileOpen = false; status = "Perfil guardat" }
+                        check(expectedId != null && account?.id == expectedId && account?.username == expectedUsername) {
+                            "La sessió ha canviat abans de guardar el perfil"
+                        }
+                        val saved = api.updateMyPublicProfile(updated.displayName, updated.bio, remove,
+                            discipline = updated.discipline, companyName = updated.companyName,
+                            castText = updated.castText, publisherName = updated.publisherName,
+                            booksText = updated.booksText, worksText = updated.worksText,
+                            spacesText = updated.spacesText)
+                        if (account?.id == expectedId && account?.username == expectedUsername) {
+                            myProfile = saved; editProfileOpen = false; status = "Perfil guardat al servidor"
+                        }
                     }
                 })
         }
@@ -2236,34 +2190,67 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                     if (account?.id == expectedId) {
                         // Revokes local reminders for the previous identity and clears account-scoped UI.
                         user.alerts.forEach { eventId -> sessionBridge?.cancelLocalReminder(expectedId ?: 0, eventId) }
-                        account = null; myProfile = null; user = guestUserState(); artistBells = emptyMap()
-                        tickets = emptyList(); notices = emptyList(); groups = emptyList(); seenBatecs = emptySet(); batecRecentEventCreations = emptyMap()
+                        account = null; myProfile = null; user = IosUserState(); artistBells = emptyMap()
+                        tickets = emptyList(); ticketsOffline = false; ticketLoadNotice = ""
+                        notices = emptyList(); groups = emptyList(); seenBatecs = emptySet()
                         savedLists = emptyList(); searchPresets = emptyList()
                         sessionBridge?.eraseLocalAccountData(expectedId ?: 0)
+                        serverState = null
+                        guestReadyUserId = runCatching { api.ensureGuestIdentity() }.getOrNull()
+                        serverStateRefreshEpoch += 1
                         useAccountPreferences(null); deleteAccountOpen = false
-                        status = "Compte desactivat i dades personals retirades del servidor"
+                        status = "Baixa confirmada pel servidor. Les dades exigides legalment es poden conservar anonimitzades."
                     }
                 }
             })
         }
+        if (publisherMenuOpen) {
+            val expectedPublisherOwner = account?.id ?: guestReadyUserId
+            if (expectedPublisherOwner != null) {
+                key(expectedPublisherOwner) {
+                    IosPublisherPanel(api, expectedPublisherOwner, registered = account != null,
+                        onDismiss = { publisherMenuOpen = false },
+                        onAuth = { publisherMenuOpen = false; loginOpen = true },
+                        onPublished = { id ->
+                            // Keep confirmation/dialog open: guest must see "Crear compte" or "Ara no".
+                            status = "Esdeveniment $id publicat al servidor"
+                            // The publisher panel now displays the single confirmation and guest prompt.
+                            refresh(true)
+                        },
+                        onAdmin = { action ->
+                            publisherMenuOpen = false
+                            adminDestination = if (action == IosPublishAction.REVIEW_PUBLICATIONS) "Publicacions" else "Sol·licituds"
+                            tab = "Perfil"
+                        },
+                        onNotice = { status = it })
+                }
+            } else {
+                LaunchedEffect(Unit) { guestReadyUserId = runCatching { api.ensureGuestIdentity() }.getOrNull() }
+            }
+        }
         if (validatorOpen) ProfessionalValidationDialog(api, onDismiss = { validatorOpen = false })
         ticketEvent?.let { event -> TicketOptionsDialog(event, api,
-            authenticated = account != null,
-            onLoginRequired = { ticketEvent = null; loginOpen = true },
-            onDismiss = { ticketEvent = null }, onPurchased = {
-                ticketEvent = null; status = "Entrades gratuïtes emeses correctament"; tab = "Entrades"
-                work { tickets = api.tickets() }
+            pendingStart = pendingTicketPayments[(api.activePersonalId() ?: 0) to event.id],
+            onPaymentCreated = { start ->
+                pendingTicketPayments = pendingTicketPayments + ((start.userId to start.eventId) to start)
+            },
+            onPaymentCleared = { start ->
+                val key = start.userId to start.eventId
+                if (pendingTicketPayments[key]?.orderId == start.orderId)
+                    pendingTicketPayments = pendingTicketPayments - key
+            },
+            onDismiss = { ticketEvent = null }, onPurchased = { paidPurchase ->
+                ticketEvent = null
+                status = if (paidPurchase) "Pagament confirmat i entrades disponibles" else "Entrades gratuïtes emeses correctament"
+                tab = "Entrades"
+                work { reloadMyTickets() }
             }, onError = { error = it }) }
         groupCreateFor?.let { event -> CreateGroupDialog(event, api, onDismiss = { groupCreateFor = null },
             onCreated = { groupCreateFor = null; status = "Tauló creat"; work { groups = api.community(event.id) } },
             onError = { error = it }) }
-        communityGroup?.let { g ->
-            if (account == null) IosGuestCommunityPreview(g,
-                onDismiss = { communityGroup = null }, onLogin = { communityGroup = null; loginOpen = true })
-            else IosCommunityChatDialog(g, api, account?.id ?: 0,
-                onDismiss = { communityGroup = null }, onChanged = { work { groups = api.community() } })
-        }
-        reminderToSchedule?.let { ev -> ReminderEditorDialog(ev, account?.id ?: 0,
+        communityGroup?.let { g -> IosCommunityChatDialog(g, api, account?.id ?: guestReadyUserId ?: 0,
+            onDismiss = { communityGroup = null }, onChanged = { work { groups = api.community() } }) }
+        reminderToSchedule?.let { ev -> ReminderEditorDialog(ev, account?.id ?: guestReadyUserId ?: 0, remoteReminderTime(ev.id),
             onDismiss = { reminderToSchedule = null }, onSave = { requestedAt ->
             reminderToSchedule = null
             toggleReminder(ev, true, requestedAt)
@@ -2272,32 +2259,15 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
             text = { Text(ev.title) }, dismissButton = { TextButton(onClick = { alertToDisable = null }) { Text("Mantindre") } },
             confirmButton = { TextButton(onClick = { toggleReminder(ev, false); alertToDisable = null }) { Text("Desactivar") } }) }
     }
-    if (firstRunOpen && account == null) {
-        IosFirstRunOnboardingDialog(
-            initialCategories = (chosenCategories + chosenSubcategories.mapNotNull { sub ->
-                IosPersonalizationTaxonomy.subcategories.firstOrNull { it.code == sub }?.categoryCode
-            }).intersect(IosFirstRunPolicy.disciplines.toSet()),
-            initialSubcategories = chosenSubcategories,
-            initialLocations = chosenTowns.associateWith { chosenRadii[it] ?: PersonalizationOptions.defaultRadiusKm },
-            initialArtists = user.follows.filter { it.type.equals("ARTIST",true) }.map { it.label }.toSet(),
-            events = events,
-            entityImages = remember(personalizationImagesRevision) { IosPersonalizationImages.cached() },
-            onDraftChanged = ::saveGuestFirstRun,
-            onSkip = ::completeFirstRun,
-            onContinueGuest = ::completeFirstRun,
-            onLogin = { completeFirstRun(); loginOpen = true },
-            onRegister = { completeFirstRun(); registrationOpen = true }
-        )
-    }
 }
 
 @Composable
-private fun ReminderEditorDialog(event: AgendaEventSummary, userId: Int, onDismiss: () -> Unit, onSave: (String) -> Unit) {
-    val previous = remember(event.id, userId) { platformReadPublicCache(iosReminderKey(userId, event.id)) }
+private fun ReminderEditorDialog(event: AgendaEventSummary, userId: Int, serverReminderTime: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    val previous = serverReminderTime
     var date by remember(event.id) { mutableStateOf(previous.take(10).ifBlank { event.date.take(10) }) }
     var time by remember(event.id) { mutableStateOf(previous.drop(11).take(5).ifBlank { "10:00" }) }
-    val valid = date.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) &&
-        time.matches(Regex("(?:[01]\\d|2[0-3]):[0-5]\\d"))
+    val valid = IosReminderPolicy.validLocalDateTime("${date}T${time}") &&
+        (IosNativeBridge.current?.reminderEpochMillis("${date}T${time}") ?: 0L) > currentEpochMillis()
     AlertDialog(onDismissRequest = onDismiss,
         title = { Text("Quan vols que t'avisem?") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -2351,15 +2321,22 @@ private fun EventCard(ev: AgendaEventSummary, isSaved: Boolean, onClick: () -> U
 private fun FeedCompactEventCard(ev: AgendaEventSummary, today: String, onClick: () -> Unit,
                                   trailing: @Composable () -> Unit) {
     val scheduledDays = ev.schedule.map { it.date }
-    val shownDate = IosUnfilteredFeedPolicy.relevantDate(ev.date, ev.endDate, today,
-        if (ev.isFestival) scheduledDays else emptyList())
-    val ongoing = ev.isFestival && IosUnfilteredFeedPolicy.ongoingWithoutSchedule(
-        ev.date, ev.endDate, today, scheduledDays)
-    val subtitle = if (ev.isFestival && !ongoing) {
-        IosUnfilteredFeedPolicy.festivalSummary(shownDate,
+    val shownDate = ev.feedOccurrenceDate.ifBlank {
+        IosUnfilteredFeedPolicy.relevantDate(ev.date, ev.endDate, today,
+            if (ev.isFestival) scheduledDays else emptyList())
+    }
+    // The source must contain an explicit future programme day. Never label an
+    // unscheduled festival as 'En curs' and invent an occurrence on today's date.
+    val preStartFestival = IosUnfilteredAgenda.isFestivalBeforeStart(ev, today)
+    val subtitle = when {
+        preStartFestival -> (ev.artists + ev.schedule.map { it.artist.ifBlank { it.title } })
+            .filter(String::isNotBlank).distinctBy { it.lowercase() }.joinToString(" · ")
+            .ifBlank { ev.subtitle }
+        ev.isFestival -> IosUnfilteredFeedPolicy.festivalSummary(shownDate,
             ev.schedule.map { it.date to it.artist.ifBlank { it.title } },
-            ev.artists.joinToString(" · ").ifBlank { ev.subtitle })
-    } else if (ev.isFestival) "" else ev.subtitle
+            ev.subtitle)
+        else -> ev.subtitle
+    }
     val categoryColor = when {
         ev.category.contains("música", true) || ev.category.contains("musica", true) -> Color(0xFF8C59A9)
         ev.category.contains("teatre", true) || ev.category.contains("escèn", true) -> Color(0xFFAE673F)
@@ -2390,7 +2367,7 @@ private fun FeedCompactEventCard(ev: AgendaEventSummary, today: String, onClick:
                     fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     color = Ink)
                 Spacer(Modifier.height(4.dp))
-                val displayedTime = if (ongoing) "" else ev.time
+                val displayedTime = ev.time
                 val ticket = IosUnfilteredFeedPolicy.ticketLabel(ev.ticketAvailable, ev.price)
                 Text("◷ ${displayedTime.ifBlank { "—" }} · $ticket", fontSize = 12.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color.DarkGray)
@@ -2399,7 +2376,7 @@ private fun FeedCompactEventCard(ev: AgendaEventSummary, today: String, onClick:
             Column(Modifier.width(64.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(ev.category, fontSize = 9.sp, maxLines = 1,
                     color = categoryColor, overflow = TextOverflow.Ellipsis)
-                Text(if (ongoing) "En curs" else IosUnfilteredFeedPolicy.cardDate(shownDate),
+                Text(IosUnfilteredFeedPolicy.cardDate(shownDate),
                     fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Ink, maxLines = 1)
                 trailing()
             }
@@ -2480,14 +2457,16 @@ private fun SponsoredCarousel(label: String, ads: List<IosAd>, eventById: Map<In
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, kotlinx.coroutines.FlowPreview::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EventList(events: List<AgendaEventSummary>, total: Int,
+                      artistSearch: String = "",
+                      festivalSchedules: Map<Int, List<AgendaScheduleEntry>> = emptyMap(),
                       headerContent: @Composable () -> Unit, onLoadMore: () -> Unit,
                       today: String, scrollContext: String,
-                      readingEnabled: Boolean, loadedCount: Int,
-                      onRestoreLoaded: (Int) -> Unit, feedExpiredEpoch: Int,
-                      catalogHydrated: Boolean,
+                      restoreReading: IosFeedReadingPolicy.Snapshot?,
+                      readingRestoreEpoch: Int,
+                      onReadingPosition: (Int, Int, Boolean) -> Unit,
                       savedIds: Set<Int>, onClick: (AgendaEventSummary) -> Unit,
                       onSave: (AgendaEventSummary) -> Unit, ads: List<IosAd>,
                       protectedIds: Set<Int>, commercialEvents: Map<Int, AgendaEventSummary>,
@@ -2497,60 +2476,41 @@ private fun EventList(events: List<AgendaEventSummary>, total: Int,
                       returnToStartEpoch: Int,
                       onExclude: (AgendaEventSummary, String) -> Unit,
                       onReport: (AgendaEventSummary) -> Unit) {
-    // LazyListState lives across ordinary recompositions; disk state survives full relaunches.
     val listState = rememberLazyListState()
-    val restored = remember(scrollContext, readingEnabled, feedExpiredEpoch) {
-        if (readingEnabled) IosFeedReadingSession.load(scrollContext) else null
+    var positionRestored by remember(scrollContext, readingRestoreEpoch) { mutableStateOf(false) }
+    val latestOnReadingPosition by rememberUpdatedState(onReadingPosition)
+    // Restore both item and pixel offset. The first LazyColumn row is the header,
+    // so keep its real list index instead of assuming card index = row index.
+    LaunchedEffect(scrollContext, readingRestoreEpoch) {
+        positionRestored = false
+        val saved = restoreReading
+        val targetRows = if (saved == null) 1 else
+            (saved.firstIndex + 1).coerceAtMost(total + 1).coerceAtLeast(1)
+        snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it >= targetRows }
+        if (saved != null) {
+            listState.scrollToItem(saved.firstIndex.coerceIn(0, listState.layoutInfo.totalItemsCount - 1),
+                saved.firstOffset)
+        } else listState.scrollToItem(0)
+        positionRestored = true
     }
-    var restoredToCard by remember(scrollContext, readingEnabled, feedExpiredEpoch) {
-        mutableStateOf(restored == null)
-    }
-    LaunchedEffect(scrollContext, readingEnabled, feedExpiredEpoch) {
-        if (restored != null) {
-            // A restored index is beyond the initial five cards: hydrate enough BEFORE scrollToItem.
-            onRestoreLoaded(maxOf(5, restored.loaded, restored.index + 20))
-        } else {
-            listState.scrollToItem(0)
-        }
-    }
-    LaunchedEffect(scrollContext, feedExpiredEpoch, events.size, total, restored, catalogHydrated) {
-        val target = restored
-        if (target != null && !restoredToCard && events.isNotEmpty()) {
-            // Wait for Compose to lay out the newly hydrated batch, avoiding an early clamp to 0.
-            val required = target.index
-            if (events.size + 1 > required || (catalogHydrated && events.size >= total)) {
-                val count = snapshotFlow { listState.layoutInfo.totalItemsCount }.first {
-                    it > required || (catalogHydrated && events.size >= total && it > 0)
-                }
-                listState.scrollToItem(required.coerceIn(0, count - 1), target.offset)
-                restoredToCard = true
-            }
-        }
-    }
-    // Reproduce Android's exact index + pixel offset; keep the latest unsaved pixels in RAM
-    // so entering the iOS background flushes them without waiting for the debounce.
-    LaunchedEffect(scrollContext, readingEnabled, restoredToCard, loadedCount, feedExpiredEpoch) {
-        if (readingEnabled && restoredToCard) {
+    // Keep the in-memory position at pixel precision even if the app backgrounds
+    // mid-scroll; ONLY the settled position starts a debounced server write.
+    LaunchedEffect(scrollContext, readingRestoreEpoch, listState, positionRestored) {
+        if (positionRestored) {
             snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
-                .onEach { (index, offset) ->
-                    IosFeedReadingSession.cache(scrollContext, index, offset, loadedCount)
-                }
-                .debounce(350L)
-                .collect { IosFeedReadingSession.flush() }
+                .collect { (index, offset) -> latestOnReadingPosition(index, offset, false) }
         }
     }
-    DisposableEffect(scrollContext, readingEnabled, restoredToCard) {
-        onDispose { if (readingEnabled && restoredToCard) IosFeedReadingSession.flush() }
+    LaunchedEffect(scrollContext, readingRestoreEpoch, listState, positionRestored) {
+        if (positionRestored) {
+            snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+                .debounce(900L)
+                .collect { (index, offset) -> latestOnReadingPosition(index, offset, true) }
+        }
     }
-    // Batecs intentionally return to the first card, even with a persisted reading session.
+    // Closing the Batec returns the whole feed to its first card/ad, not only the story strip.
     LaunchedEffect(returnToStartEpoch) {
-        if (returnToStartEpoch > 0) {
-            listState.scrollToItem(0)
-            if (readingEnabled) {
-                IosFeedReadingSession.cache(scrollContext, 0, 0, loadedCount)
-                IosFeedReadingSession.flush()
-            }
-        }
+        if (returnToStartEpoch > 0) listState.scrollToItem(0)
     }
     val premiumAds = remember(ads) { ads.filter { it.placement == "FEED_PREMIUM" } }
     val normalAds = remember(ads) { ads.filter { it.placement == "FEED_NORMAL" } }
@@ -2574,7 +2534,7 @@ private fun EventList(events: List<AgendaEventSummary>, total: Int,
                     if (GlobalAdPlacementPolicy.normalAt(index, premium, normal)) {
                         SponsoredCarousel("Normal", normalAds, eventById, onAdViewed, onAdOpened)
                     }
-                    val isCommercial = ev.id in protectedIds || ev.ticketAvailable || ev.id in advertisedEventIds
+                    val isCommercial = IosCommercialVisibility.protected(ev, protectedIds + advertisedEventIds)
                     Box(Modifier.fillMaxWidth()) {
                         FeedCompactEventCard(ev, today, onClick = { onClick(ev) }, trailing = {
                             var menuVisible by remember(ev.key) { mutableStateOf(false) }
@@ -2616,6 +2576,17 @@ private fun EventList(events: List<AgendaEventSummary>, total: Int,
                                 }
                             }
                         })
+                    }
+                    if (artistSearch.isNotBlank() && ev.isFestival &&
+                        IosFestivalArtistSearch.isInLineup(ev, artistSearch)) {
+                        val artistSlot = IosFestivalArtistSearch.firstVerified(
+                            ev, artistSearch, festivalSchedules[ev.id])
+                        val summary = if (artistSlot != null) {
+                            listOf(artistSearch, artistSlot.date.take(10), artistSlot.time,
+                                artistSlot.location).filter(String::isNotBlank).joinToString(" · ")
+                        } else "$artistSearch · Horari pendent de confirmar"
+                        Text(summary, modifier = Modifier.padding(start = 17.dp, end = 17.dp, bottom = 6.dp),
+                            fontSize = 11.sp, fontWeight = FontWeight.Medium, color = AgendaBlack)
                     }
                 }
             }
@@ -2742,80 +2713,311 @@ private fun RegistrationDialog(onDismiss: () -> Unit, onSubmit: (String, String,
 }
 
 @Composable
+private fun PersonalizationDialog(categories: Set<String>, towns: Set<String>, hiddenEventIds: Set<Int>,
+                                  hiddenArtists: Set<String>, hiddenCategories: Set<String>,
+                                  allEvents: List<AgendaEventSummary>, options: List<String>, townOptions: List<String>,
+                                  styles: Set<String>, comarques: Set<String>, radii: Map<String,Int>,
+                                  suggestions: Boolean, discovery: DiscoveryLevel, valencian: Boolean,
+                                  language: IosUiLanguage, onDismiss: () -> Unit,
+                                  onSave: (Set<String>, Set<String>, Set<Int>, Set<String>, Set<String>,
+                                           Set<String>, Set<String>, Map<String,Int>, Boolean, DiscoveryLevel,
+                                           Boolean, IosUiLanguage) -> Unit) {
+    var cat by remember { mutableStateOf(categories) }
+    var selectedTowns by remember { mutableStateOf(towns) }
+    var townQuery by remember { mutableStateOf("") }
+    var selectedStyles by remember { mutableStateOf(styles) }
+    var selectedComarques by remember { mutableStateOf(comarques) }
+    var perTownRadius by remember { mutableStateOf(radii) }
+    var suggestionsEnabled by remember { mutableStateOf(suggestions) }
+    var selectedDiscovery by remember { mutableStateOf(discovery) }
+    var preferredValencian by remember { mutableStateOf(valencian) }
+    var selectedUiLanguage by remember { mutableStateOf(language) }
+    var comarcaQuery by remember { mutableStateOf("") }
+    // Exact Android taxonomy, not free-form event styles: user_follows stores these codes.
+    val possibleSubcategories = remember { IosCategoryTaxonomy.subcategories }
+    val possibleComarques = remember { IosGeoPlaces.allComarques() }
+
+    var hiddenEventsDraft by remember { mutableStateOf(hiddenEventIds) }
+    var hiddenArtistsDraft by remember { mutableStateOf(hiddenArtists) }
+    var hiddenCategoriesDraft by remember { mutableStateOf(hiddenCategories) }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = RoundedCornerShape(22.dp), color = Color.White, modifier = Modifier.fillMaxWidth().fillMaxHeight(0.88f)) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Personalització", fontWeight = FontWeight.Bold, fontSize = 22.sp)
+                Text("Seguiments sense límit de distància · estils dins del radi triat · preferències fins a 100 km.",
+                    fontSize = 11.sp, color = Color.Gray)
+                Spacer(Modifier.height(10.dp))
+                Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                    Text("Categories", fontWeight = FontWeight.Bold)
+                    options.forEach { key ->
+                        val caption = IosCategoryTaxonomy.label(key)
+                        Row(Modifier.fillMaxWidth().clickable {
+                            val next = IosCategoryTaxonomy.toggleCategory(
+                                IosCategorySelection(cat, selectedStyles), key)
+                            cat = next.categories; selectedStyles = next.subcategories
+                        }, verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = key in cat, onCheckedChange = {
+                                val next = IosCategoryTaxonomy.toggleCategory(
+                                    IosCategorySelection(cat, selectedStyles), key)
+                                cat = next.categories; selectedStyles = next.subcategories
+                            })
+                            Text(caption, fontSize = 13.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("Subcategories", fontWeight = FontWeight.Bold)
+                    possibleSubcategories.forEach { sub ->
+                        val selected = sub.categoryKey in cat || sub.code in selectedStyles
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = selected, onCheckedChange = {
+                                val next = IosCategoryTaxonomy.toggleSubcategory(
+                                    IosCategorySelection(cat, selectedStyles), sub.code)
+                                cat = next.categories; selectedStyles = next.subcategories
+                            })
+                            Column {
+                                Text(sub.label, fontSize = 13.sp)
+                                Text(IosCategoryTaxonomy.label(sub.categoryKey), fontSize = 10.sp, color = Color.Gray)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("Comarques d'interés",fontWeight = FontWeight.Bold)
+                    OutlinedTextField(comarcaQuery,{ comarcaQuery = it },label = { Text("Busca una comarca") },
+                        singleLine = true,modifier = Modifier.fillMaxWidth())
+                    (selectedComarques + possibleComarques.filter {
+                        comarcaQuery.isNotBlank() && it.contains(comarcaQuery,true) }.take(20)).distinct().sorted().forEach { item ->
+                        Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = item in selectedComarques,onCheckedChange = { checked ->
+                                selectedComarques = if (checked) selectedComarques + item else selectedComarques - item })
+                            Text(item,fontSize = 13.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("Poblacions d'interés", fontWeight = FontWeight.Bold)
+                    OutlinedTextField(value = townQuery, onValueChange = { townQuery = it }, singleLine = true,
+                        label = { Text("Busca una població") }, modifier = Modifier.fillMaxWidth())
+                    (selectedTowns + townOptions.filter { townQuery.isNotBlank() && it.contains(townQuery, true) }.take(25)
+                        + IosGeoPlaces.searchTowns(townQuery)).distinct().sorted().forEach { item ->
+                        Row(Modifier.fillMaxWidth().clickable { selectedTowns = if (item in selectedTowns) selectedTowns - item else selectedTowns + item },
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = item in selectedTowns, onCheckedChange = { active ->
+                                selectedTowns = if (active) selectedTowns + item else selectedTowns - item
+                            })
+                            Column {
+                                Text(item, fontSize = 13.sp)
+                                if (item in selectedTowns) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                                        PersonalizationOptions.locationRadiiKm.forEach { r ->
+                                            val isSelected = (perTownRadius[item] ?: PersonalizationOptions.defaultRadiusKm) == r
+                                            TextButton(onClick = { perTownRadius = perTownRadius + (item to r) },
+                                                contentPadding = PaddingValues(horizontal = 3.dp, vertical = 1.dp)) {
+                                                Text("${r}k",fontSize = 10.sp,
+                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("Idioma de l'app (Android / iPhone)", fontWeight = FontWeight.Bold)
+                    IosUiLanguage.entries.forEach { option ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            RadioButton(selected = selectedUiLanguage == option,
+                                onClick = { selectedUiLanguage = option })
+                            Text(option.label, modifier = Modifier.clickable { selectedUiLanguage = option }, fontSize = 13.sp)
+                        }
+                    }
+                    Text("L'idioma de l'app és independent de l'idioma dels esdeveniments.",
+                        fontSize = 11.sp, color = Color.Gray)
+                    Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = preferredValencian,onCheckedChange = { preferredValencian = it })
+                        Text("Prioritzar activitats en valencià",fontSize = 13.sp)
+                    }
+                    Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = suggestionsEnabled,onCheckedChange = { suggestionsEnabled = it })
+                        Text("Suggerències segons les activitats obertes (últims 15 dies)",fontSize = 12.sp)
+                    }
+                    if (IosFeedPreferencesContract.displayDiscovery(suggestionsEnabled)) {
+                        DiscoveryLevel.entries.forEach { item ->
+                            Row(Modifier.fillMaxWidth(),verticalAlignment = Alignment.CenterVertically) {
+                                RadioButton(selected = selectedDiscovery == item,onClick = { selectedDiscovery = item })
+                                Text(item.label,fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(15.dp))
+                    Text("Contingut ocultat del feed", fontWeight = FontWeight.Bold)
+                    Text("Pots recuperar qualsevol exclusió. Les activitats comercials obligatòries continuen visibles.",
+                        fontSize = 11.sp, color = Color.Gray)
+                    hiddenEventsDraft.sorted().forEach { id ->
+                        val title = allEvents.firstOrNull { it.id == id }?.title ?: "Esdeveniment #$id"
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(title, modifier = Modifier.weight(1f), fontSize = 12.sp)
+                            TextButton(onClick = { hiddenEventsDraft = hiddenEventsDraft - id }) { Text("Mostrar") }
+                        }
+                    }
+                    hiddenArtistsDraft.sorted().forEach { name ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Artista: $name", modifier = Modifier.weight(1f), fontSize = 12.sp)
+                            TextButton(onClick = { hiddenArtistsDraft = hiddenArtistsDraft - name }) { Text("Mostrar") }
+                        }
+                    }
+                    hiddenCategoriesDraft.sorted().forEach { name ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("Categoria: $name", modifier = Modifier.weight(1f), fontSize = 12.sp)
+                            TextButton(onClick = { hiddenCategoriesDraft = hiddenCategoriesDraft - name }) { Text("Mostrar") }
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismiss) { Text("Cancel·lar") }
+                    Button(onClick = { onSave(cat, selectedTowns, hiddenEventsDraft, hiddenArtistsDraft, hiddenCategoriesDraft,
+                        selectedStyles,selectedComarques,perTownRadius.filterKeys { it in selectedTowns },
+                        suggestionsEnabled,selectedDiscovery,preferredValencian,selectedUiLanguage) }) { Text("Guardar") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: Boolean, matchedArtist: String,
                              followsEntity: (String, String) -> Boolean, onToggleFollowEntity: (String, String) -> Unit,
                              onDismiss: () -> Unit, onSave: () -> Unit, onReminder: () -> Unit,
-                             userId: Int?, onReport: () -> Unit,
+                             userId: Int?, serverSlots: Set<String>?, saveFestivalSlots: suspend (Set<String>) -> Boolean,
+                             onReport: () -> Unit,
+                             batecApi: IosAgendaApi, canPublishBatec: Boolean,
+                             onBatecsChanged: () -> Unit, onBatecSignIn: () -> Unit,
                              loadSchedule: suspend (Int) -> List<AgendaScheduleEntry>,
-                             onArtist: (String) -> Unit, onCommunity: () -> Unit, onCreateGroup: () -> Unit, onTickets: () -> Unit) {
+                             onArtist: (String) -> Unit, onCommunity: () -> Unit,
+                             onOpenCommunityGroup: (IosCommunityGroup) -> Unit,
+                             onCreateGroup: () -> Unit, onTickets: () -> Unit) {
     // Never invent days between start and end dates. Only real scheduled sessions get tabs.
+    var servicesOpen by remember(ev.id) { mutableStateOf(false) }
     var detailSchedule by remember(ev.id) { mutableStateOf(ev.schedule) }
     var detailLoading by remember(ev.id) { mutableStateOf(ev.isFestival) }
-    var detailLoadError by remember(ev.id) { mutableStateOf(false) }
-    var scheduleRetry by remember(ev.id) { mutableIntStateOf(0) }
-    LaunchedEffect(ev.id, scheduleRetry) {
+    var detailError by remember(ev.id) { mutableStateOf("") }
+    var detailReload by remember(ev.id) { mutableIntStateOf(0) }
+    LaunchedEffect(ev.id, detailReload) {
         if (ev.isFestival) {
             detailLoading = true
-            detailLoadError = false
-            runCatching { loadSchedule(ev.id) }.onSuccess { fresh ->
-                if (fresh.isNotEmpty()) detailSchedule = fresh
-            }.onFailure { detailLoadError = true }
+            detailError = ""
+            runCatching { loadSchedule(ev.id) }
+                .onSuccess { fresh ->
+                    if (fresh.isNotEmpty()) detailSchedule =
+                        IosFestivalPopupPolicy.mergePublished(fresh, ev.schedule)
+                    else if (detailSchedule.isEmpty()) detailError = "Encara no hi ha horaris publicats."
+                }
+                .onFailure { detailError = "No s'ha pogut carregar la programació." }
         }
         detailLoading = false
     }
-    var visibleToday by remember(ev.id) { mutableStateOf(currentCulturalDateIso()) }
+    // Android uses the published remote programme, falling back to the catalog
+    // slot for the searched artist if the remote programme omits that artist.
+    // Both sources are actual schedule rows; no date is inferred from festival span.
+    val festivalProgramme = remember(ev.id, matchedArtist, detailSchedule, ev.schedule) {
+        val publishedContainsArtist = detailSchedule.any {
+            IosFestivalArtistSearch.matchesArtist(it, matchedArtist)
+        }
+        if (matchedArtist.isBlank() || publishedContainsArtist) detailSchedule
+        else (detailSchedule + ev.schedule.filter {
+            IosFestivalArtistSearch.matchesArtist(it, matchedArtist)
+        }).distinctBy { listOf(it.date, it.time, it.artist, it.title, it.location) }
+    }
+    // A cultural day ends at 05:00 Europe/Madrid, just like Android's FestivalDayVisibility.
+    var culturalToday by remember(ev.id) { mutableStateOf(currentAgendaDateIso()) }
     LaunchedEffect(ev.id) {
         while (true) {
-            visibleToday = currentCulturalDateIso()
+            culturalToday = currentAgendaDateIso()
             kotlinx.coroutines.delay(60_000L)
         }
     }
-    val festivalDays = remember(ev.id, detailSchedule, visibleToday) {
-        IosEventPopupPolicy.publishedDays(detailSchedule, visibleToday)
+    val festivalDays = remember(ev.id, festivalProgramme, culturalToday) {
+        IosFestivalPopupPolicy.upcomingDays(festivalProgramme, culturalToday)
     }
-    val targetSlot = remember(ev.id, matchedArtist, detailSchedule, visibleToday) {
-        IosEventPopupPolicy.matchingSlot(detailSchedule, matchedArtist, fromDate = visibleToday)
+    val targetSlot = remember(ev.id, matchedArtist, festivalProgramme) {
+        IosFestivalArtistSearch.firstVerified(ev, matchedArtist, festivalProgramme)
     }
-    var section by remember(ev.id, matchedArtist) { mutableStateOf("Artistes") }
+    var section by remember(ev.id, matchedArtist) {
+        mutableStateOf(if (ev.isFestival) "Horaris" else "Info")
+    }
     var selectedDay by remember(ev.id, matchedArtist) {
-        mutableStateOf(targetSlot?.date?.take(10)?.takeIf(String::isNotBlank) ?: festivalDays.firstOrNull().orEmpty())
+        mutableStateOf(IosFestivalPopupPolicy.initialDay(festivalDays, targetSlot, ev.displayDate))
     }
     LaunchedEffect(targetSlot?.date, festivalDays) {
-        val focused = targetSlot?.date?.take(10)
-        if (!focused.isNullOrBlank() && focused in festivalDays) selectedDay = focused
-        else if (selectedDay !in festivalDays) selectedDay = festivalDays.firstOrNull().orEmpty()
+        selectedDay = IosFestivalPopupPolicy.initialDay(festivalDays, targetSlot, selectedDay)
     }
+    var onlyMyPerformances by remember(ev.id, userId, selectedDay) { mutableStateOf(false) }
+    var ticketsDayFilter by remember(ev.id) { mutableStateOf("") }
+    var mapDestination by remember(ev.id) { mutableStateOf("") }
+    val detailScrollState = rememberScrollState()
+    LaunchedEffect(section, selectedDay) { detailScrollState.scrollTo(0) }
+    // Each event and server identity receives its own ephemeral tab data.
+    var eventGroups by remember(ev.id, userId) { mutableStateOf(emptyList<IosCommunityGroup>()) }
+    var communityLoading by remember(ev.id, userId) { mutableStateOf(false) }
+    var communityError by remember(ev.id, userId) { mutableStateOf("") }
+    var communityReload by remember(ev.id, userId) { mutableIntStateOf(0) }
+    var ticketOptions by remember(ev.id) { mutableStateOf(emptyList<IosTicketOption>()) }
+    var ticketsLoading by remember(ev.id) { mutableStateOf(false) }
+    var ticketOptionsError by remember(ev.id) { mutableStateOf("") }
+    var ticketsReload by remember(ev.id) { mutableIntStateOf(0) }
+    LaunchedEffect(ev.id, userId, section, communityReload) {
+        if (section == "Comunitat" && userId != null) {
+            communityLoading = true
+            communityError = ""
+            runCatching { batecApi.community(ev.id) }
+                .onSuccess { eventGroups = it.filter { group -> group.eventId == ev.id } }
+                .onFailure { communityError = it.message ?: "No s'han pogut consultar els taulons" }
+            communityLoading = false
+        }
+    }
+    LaunchedEffect(ev.id, section, ticketsReload) {
+        if (section == "Entrades" && ev.ticketAvailable && ev.ticketUrl.isBlank()) {
+            ticketsLoading = true
+            ticketOptionsError = ""
+            ticketOptions = emptyList() // no deixar dades antigues visibles després d'un error HTTP
+            runCatching { batecApi.ticketOptions(ev.id) }
+                .onSuccess { ticketOptions = it }
+                .onFailure { ticketOptionsError = it.message ?: "No s'han pogut consultar les entrades" }
+            ticketsLoading = false
+        }
+    }
+    var showBatecManager by remember(ev.id) { mutableStateOf(false) }
     var showPoster by remember(ev.id) { mutableStateOf(false) }
-    var pendingDirections by remember(ev.id) { mutableStateOf<String?>(null) }
-    val locationChoices = remember(ev.id, detailSchedule) {
-        val main = listOf(ev.venue, ev.town).filter(String::isNotBlank).distinct().joinToString(", ")
-        (listOf(main) + (if (ev.isFestival) detailSchedule.map { slot ->
-            listOf(slot.location, ev.venue, ev.town).filter(String::isNotBlank)
-                .distinct().joinToString(", ")
-        } else emptyList())).filter(String::isNotBlank).distinct()
-    }
-    val slotCache = remember(ev.id, userId) { iosScopedCacheKey("festival_schedule_${ev.id}", userId) }
-    var savedSlots by remember(slotCache) {
-        mutableStateOf(IosFestivalSavedSlotPolicy.decode(platformReadPublicCache(slotCache)))
-    }
-    var localSaveNote by remember(slotCache) { mutableStateOf("") }
+    var savedSlots by remember(ev.id, userId) { mutableStateOf(serverSlots.orEmpty()) }
+    var localSaveNote by remember(ev.id, userId) { mutableStateOf("") }
+    val coroutineScope = rememberCoroutineScope()
+    LaunchedEffect(serverSlots, userId, ev.id) { savedSlots = serverSlots.orEmpty() }
+    var slotSaving by remember(ev.id, userId) { mutableStateOf(false) }
     fun toggleSlot(slot: AgendaScheduleEntry) {
-        val key = IosFestivalSavedSlotPolicy.key(ev.id, slot.date, slot.time, slot.artist, slot.title)
-        val next = if (key in savedSlots) savedSlots - key else savedSlots + key
-        savedSlots = next
-        platformWritePublicCache(slotCache, IosFestivalSavedSlotPolicy.encode(next))
-        localSaveNote = if (key in next) "Actuació guardada en este iPhone" else "Actuació llevada de l'horari guardat"
+        if (slotSaving) return
+        val key = IosFestivalSavedSlotPolicy.key(ev.id, slot.date, slot.time, slot.artist, slot.title, slot.location)
+        val oldKey = IosFestivalSavedSlotPolicy.key(ev.id, slot.date, slot.time, slot.artist, slot.title)
+        val wasSelected = key in savedSlots || oldKey in savedSlots
+        val next = if (wasSelected) savedSlots - key - oldKey else savedSlots + key
+        slotSaving = true
+        coroutineScope.launch {
+            try {
+                val confirmed = saveFestivalSlots(next)
+                savedSlots = next
+                localSaveNote = if (confirmed) "Horari guardat al servidor" else
+                    "Canvi pendent de sincronització; es conservarà xifrat"
+            } catch (ex: Exception) {
+                localSaveNote = "No s'ha guardat: ${ex.message ?: "error de connexió"}"
+            } finally { slotSaving = false }
+        }
     }
     Dialog(onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        val desiredHeight = if (ev.isFestival) 720.dp else if (ev.description.length > 250 || ev.artists.size > 2) 640.dp else 555.dp
         Surface(shape = RoundedCornerShape(22.dp), color = Color.White,
-            border = BorderStroke(1.dp, Color(0xFFE7E7E7)), shadowElevation = 10.dp,
-            modifier = Modifier.fillMaxWidth(.96f).height(minOf(desiredHeight, maxHeight * .92f))) {
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                .fillMaxHeight(if (ev.isFestival) 0.92f else 0.78f)) {
             Column {
                 // Android event popup: image/title/date/place form a SINGLE gradient hero.
-                Box(Modifier.fillMaxWidth().heightIn(min = 170.dp)) {
+                Box(Modifier.fillMaxWidth().height(154.dp)) {
                     Poster(ev.posterUrl, Modifier.fillMaxSize())
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(
                         colors = listOf(Color.Black.copy(alpha = .08f),
@@ -2828,12 +3030,11 @@ private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: B
                             fontWeight = FontWeight.ExtraBold, maxLines = 2,
                             overflow = TextOverflow.Ellipsis)
                         Spacer(Modifier.height(5.dp))
-                        Text(if (ev.isFestival && ev.endDate.isNotBlank() && ev.endDate.take(10) != ev.date.take(10))
-                            "${IosUnfilteredFeedPolicy.fullDate(ev.date)} – ${IosUnfilteredFeedPolicy.fullDate(ev.endDate)}"
-                            else IosUnfilteredFeedPolicy.fullDate(ev.date), color = AgendaGold,
+                        Text(IosUnfilteredFeedPolicy.fullDate(ev.date), color = AgendaGold,
                             fontWeight = FontWeight.Bold, fontSize = 12.sp)
                         Text("⌖  ${listOf(ev.venue,ev.town).filter(String::isNotBlank).joinToString(" · ")}",
-                            color = Color.White, fontSize = 13.sp, lineHeight = 17.sp)
+                            color = Color.White, fontSize = 13.sp, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis)
                     }
                     Row(Modifier.align(Alignment.TopEnd).padding(7.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -2864,8 +3065,8 @@ private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: B
                     verticalAlignment = Alignment.CenterVertically) {
                     AgendaGlyph("calendar", Modifier.size(19.dp), Color.Gray)
                     Spacer(Modifier.width(7.dp))
-                    Text(if (ev.isFestival && ev.endDate.isNotBlank() && ev.endDate.take(10) != ev.date.take(10))
-                        "Consulta les jornades" else "${IosUnfilteredFeedPolicy.fullDate(ev.date)} · ${ev.time}",
+                    Text(if (ev.isFestival) "${festivalDays.size} jornades disponibles · Consulta els horaris"
+                        else "${IosUnfilteredFeedPolicy.fullDate(ev.date)} · ${ev.time}",
                         fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.weight(1f))
                     Text(IosUnfilteredFeedPolicy.ticketLabel(ev.ticketAvailable,ev.price),
@@ -2895,22 +3096,20 @@ private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: B
                         }
                     }
                 }
-                val tabs = listOf("Artistes", "Info", "Ubicació", "Comunitat")
-                Row(Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical=12.dp),
+                // Non-festivals: exactly four Android-compatible tabs. Festival Horaris
+                // is retained for step 26 and gets an independent Entrades tab.
+                val tabs = IosEventDetailContract.tabs(ev.isFestival)
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 11.dp, vertical=12.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     tabs.forEach { name ->
-                        val icon = when(name) { "Artistes" -> "person"; "Horaris" -> "calendar"
+                        val icon = when(name) { "Horaris" -> "calendar"; "Entrades" -> "ticket"
                             "Info" -> "info"; "Ubicació" -> "pin"; else -> "people" }
                         val active = section == name
-                        Column(Modifier.weight(1f)
+                        Column(Modifier.width(if (ev.isFestival) 78.dp else 86.dp)
                             .border(1.dp, if(active) AgendaGold else Color(0xFFE4E4E4),RoundedCornerShape(13.dp))
                             .background(if(active) Color(0xFFFFFAEB) else Color.White,RoundedCornerShape(13.dp))
-                            .clickable {
-                                section = name
-                                if (name == "Ubicació" && locationChoices.size == 1) {
-                                    pendingDirections = locationChoices.first()
-                                }
-                            }.padding(vertical=9.dp),
+                            .clickable { section = name }.padding(vertical=9.dp),
                             horizontalAlignment=Alignment.CenterHorizontally) {
                             AgendaGlyph(icon, Modifier.size(17.dp), AgendaGold)
                             Spacer(Modifier.height(6.dp))
@@ -2918,40 +3117,27 @@ private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: B
                         }
                     }
                 }
-                if (ev.isFestival && section == "Artistes") {
-                    IosFestivalSchedulePanel(
-                        event = ev, schedule = detailSchedule, loading = detailLoading,
-                        loadFailed = detailLoadError, onRetry = { scheduleRetry++ },
-                        visibleDays = festivalDays, selectedDay = selectedDay,
-                        matchedArtist = matchedArtist, savedSlots = savedSlots,
-                        onToggleSlot = ::toggleSlot, onSelectDay = { selectedDay = it },
-                        onArtist = onArtist, followsEntity = followsEntity,
-                        onToggleFollowEntity = onToggleFollowEntity,
-                        modifier = Modifier.weight(1f)
-                    )
-                } else Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+                Column(Modifier.weight(1f).verticalScroll(detailScrollState).padding(horizontal = 16.dp)) {
                     when (section) {
-                        "Artistes" -> {
-                            Text("Artistes", fontSize=19.sp, fontWeight=FontWeight.Bold,
-                                modifier=Modifier.padding(vertical=10.dp))
-                            ev.artists.filter(String::isNotBlank).distinct().forEach { a ->
-                                Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)
-                                    .background(Color(0xFFFAFAFA),RoundedCornerShape(12.dp))
-                                    .padding(10.dp), verticalAlignment=Alignment.CenterVertically) {
-                                    val artistPhoto = IosPersonalizationImages.photo(IosPersonalizationImages.cached(), "ARTIST", a)
-                                    Poster(artistPhoto, Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)))
-                                    Spacer(Modifier.width(10.dp))
-                                    Text(a, Modifier.weight(1f).clickable { onArtist(a) },
-                                        fontWeight=FontWeight.SemiBold, fontSize=14.sp,
-                                        maxLines=1, overflow=TextOverflow.Ellipsis)
-                                    TextButton(onClick={ onToggleFollowEntity("ARTIST",a) }) {
-                                        Text(if(followsEntity("ARTIST",a)) "✓ Seguint" else "+ Seguir",
-                                            fontSize=11.sp, color=AgendaBlack)
+                        "Info" -> {
+                            Text(ev.title, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                            Text(listOf(IosUnfilteredFeedPolicy.fullDate(ev.date), ev.time, ev.venue, ev.town)
+                                .filter(String::isNotBlank).joinToString(" · "), fontSize = 12.sp, color = Color.Gray)
+                            if (ev.artists.isNotEmpty() && !ev.isFestival) {
+                                Spacer(Modifier.height(12.dp))
+                                Text("Artistes", fontWeight = FontWeight.Bold)
+                                ev.artists.distinct().forEach { name ->
+                                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                        TextButton(onClick = { onArtist(name) }, modifier = Modifier.weight(1f)) {
+                                            Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                        TextButton(onClick = { onToggleFollowEntity("ARTIST", name) }) {
+                                            Text(if (followsEntity("ARTIST", name)) "✓ Seguint" else "+ Seguir")
+                                        }
                                     }
                                 }
                             }
-                        }
-                        "Info" -> {
+                            Spacer(Modifier.height(8.dp))
                             if (ev.description.isNotBlank()) {
                                 Text("Informació", fontWeight = FontWeight.Bold)
                                 Spacer(Modifier.height(6.dp))
@@ -2981,327 +3167,395 @@ private fun EventDetailSheet(ev: AgendaEventSummary, saved: Boolean, reminded: B
                                 Text("Artistes", fontWeight = FontWeight.Bold)
                                 ev.artists.distinct().forEach { a -> TextButton(onClick = { onArtist(a) }) { Text(a) } }
                             }
+                            OutlinedButton(onClick = { showBatecManager = true }) {
+                                Text("Batecs de l'esdeveniment · Publicar i gestionar")
+                            }
                             if (ev.isFestival) TextButton(onClick = { section = "Horaris" }) { Text("Veure l'horari") }
+                            OutlinedButton(onClick = { servicesOpen = true }) { Text("Serveis especials") }
                             TextButton(onClick = onReport) { Text("Informar d'un problema en la fitxa") }
                         }
                         "Horaris" -> {
+                            if (detailLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                            if (detailError.isNotBlank()) {
+                                Text(detailError, fontSize = 12.sp, color = Color.Gray)
+                                TextButton(onClick = { detailReload++ }) { Text("Tornar a consultar l'horari") }
+                            }
                             if (festivalDays.size > 1) {
                                 Row(Modifier.horizontalScroll(rememberScrollState()),
                                     horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                                     festivalDays.forEach { day ->
                                         FilterChip(selected = selectedDay == day, onClick = { selectedDay = day },
-                                            label = { Text(day) })
+                                            label = { Text(IosUnfilteredFeedPolicy.fullDate(day)) })
                                     }
                                 }
                             }
-                            if (detailLoading && detailSchedule.isEmpty()) Text("Consultant l'horari…", fontSize = 12.sp, color = Color.Gray)
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text(if (selectedDay.isNotBlank()) IosUnfilteredFeedPolicy.fullDate(selectedDay)
+                                    else "Programació", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                FilterChip(selected = !onlyMyPerformances, onClick = { onlyMyPerformances = false },
+                                    label = { Text("Tots") })
+                                Spacer(Modifier.width(5.dp))
+                                FilterChip(selected = onlyMyPerformances, onClick = { onlyMyPerformances = true },
+                                    label = { Text("Els meus") })
+                            }
                             if (localSaveNote.isNotBlank()) Text(localSaveNote, fontSize = 11.sp, color = Color.Gray)
-                            val daySlots = detailSchedule.distinctBy { IosFestivalSavedSlotPolicy.key(ev.id, it.date, it.time, it.artist, it.title) }
-                                .filter { festivalDays.size <= 1 || it.date.take(10) == selectedDay }
-                                .sortedWith(compareByDescending<AgendaScheduleEntry> { slot ->
-                                    matchedArtist.isNotBlank() && (slot.artist.contains(matchedArtist, true) || slot.title.contains(matchedArtist, true))
-                                }.thenBy { it.time }.thenBy { it.artist })
-                            if (daySlots.isEmpty()) Text("No hi ha actuacions detallades disponibles.", color = Color.Gray, fontSize = 13.sp)
+                            val daySlots = IosFestivalPopupPolicy.performances(festivalProgramme,
+                                selectedDay, onlyMyPerformances, savedSlots, ev.id)
+                            if (daySlots.isEmpty() && !detailLoading) {
+                                Text(when {
+                                    festivalDays.isEmpty() && festivalProgramme.isNotEmpty() ->
+                                        "Totes les jornades publicades ja han passat."
+                                    onlyMyPerformances -> "Encara no has guardat cap actuació d'esta jornada."
+                                    else -> "Programació pendent de publicar per a esta jornada."
+                                }, color = Color.Gray, fontSize = 13.sp)
+                            }
+                            var priorGroup = ""
                             daySlots.forEach { slot ->
-                                val isMatch = matchedArtist.isNotBlank() && (slot.artist.contains(matchedArtist, true) || slot.title.contains(matchedArtist, true))
-                                val key = IosFestivalSavedSlotPolicy.key(ev.id, slot.date, slot.time, slot.artist, slot.title)
-                                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                                    .background(if (isMatch) Accent else Pale, RoundedCornerShape(9.dp)).padding(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically) {
-                                    Text(slot.time.ifBlank { "—" }, modifier = Modifier.width(48.dp), fontSize = 12.sp)
-                                    Column(Modifier.weight(1f)) {
-                                        val who = slot.artist.ifBlank { slot.title }
-                                        TextButton(onClick = { if (who.isNotBlank()) onArtist(who) },
-                                            contentPadding = PaddingValues(0.dp)) {
-                                            Text(who, fontSize = 13.sp, fontWeight = if (isMatch) FontWeight.Bold else FontWeight.Normal)
+                                val group = slot.groupName.ifBlank { slot.location }.trim()
+                                if (group.isNotBlank() && group != priorGroup) {
+                                    Text(group, fontWeight = FontWeight.Bold, fontSize = 14.sp,
+                                        modifier = Modifier.padding(top = 10.dp, bottom = 3.dp))
+                                }
+                                priorGroup = group
+                                val isMatch = IosFestivalArtistSearch.matchesArtist(slot, matchedArtist)
+                                val isSaved = IosFestivalPopupPolicy.saved(ev.id, slot, savedSlots)
+                                Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                    .border(1.dp, if (isMatch || isSaved) AgendaGold else Color(0xFFE4E4E4),
+                                        RoundedCornerShape(12.dp))
+                                    .background(if (isMatch) Color(0xFFFFFAEB) else Color.White,
+                                        RoundedCornerShape(12.dp)).padding(10.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(slot.time.ifBlank { "Hora per confirmar" } +
+                                            slot.endTime.takeIf(String::isNotBlank)?.let { " – $it" }.orEmpty(),
+                                            modifier = Modifier.weight(1f), fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold, color = Color(0xFF946C00))
+                                        TextButton(enabled = !slotSaving, onClick = { toggleSlot(slot) }) {
+                                            Text(if (isSaved) "✓ Guardat" else "+ Guardar", fontSize = 12.sp)
                                         }
-                                        if (slot.location.isNotBlank()) Text(slot.location, fontSize = 11.sp, color = Color.Gray)
                                     }
-                                    TextButton(onClick = { toggleSlot(slot) }) {
-                                        Text(if (key in savedSlots) "✓" else "+", fontSize = 18.sp)
+                                    val who = slot.artist.ifBlank { slot.title }
+                                    TextButton(onClick = { if (slot.artist.isNotBlank()) onArtist(slot.artist) },
+                                        enabled = slot.artist.isNotBlank(),
+                                        contentPadding = PaddingValues(0.dp)) {
+                                        Text(slot.title.ifBlank { who }, fontSize = 14.sp,
+                                            fontWeight = if (isMatch) FontWeight.Bold else FontWeight.SemiBold)
+                                    }
+                                    if (slot.artist.isNotBlank() && !slot.artist.equals(slot.title, true)) {
+                                        Text(slot.artist, fontSize = 12.sp)
+                                    }
+                                    if (slot.location.isNotBlank()) Text(slot.location, fontSize = 11.sp, color = Color.Gray)
+                                    if (slot.details.isNotBlank()) Text(slot.details, fontSize = 12.sp,
+                                        color = Color.DarkGray, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                    if (slot.artist.isNotBlank()) {
+                                        TextButton(onClick = { onToggleFollowEntity("ARTIST", slot.artist) }) {
+                                            Text(if (followsEntity("ARTIST", slot.artist)) "✓ Seguint" else "+ Seguir",
+                                                fontSize = 12.sp)
+                                        }
                                     }
                                 }
                             }
-                            if (savedSlots.isNotEmpty()) {
-                                Spacer(Modifier.height(8.dp))
-                                Text("Horari guardat localment en este dispositiu (no sincronitzat amb altres).", fontSize = 11.sp, color = Color.Gray)
-                            }
+                            if (savedSlots.isNotEmpty()) Text("Actuacions guardades al teu compte del servidor.",
+                                fontSize = 11.sp, color = Color.Gray)
                         }
                         "Entrades" -> {
-                            Text(if (ev.ticketAvailable) "Venda d'entrades" else "Sense venda d'entrades", fontWeight = FontWeight.Bold)
-                            if (ev.price.isNotBlank()) Text("Preu: ${ev.price} €")
-                            Button(onClick = onTickets, enabled = ev.ticketAvailable) { Text("Consultar entrades") }
+                            Text("Entrades", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                            if (ev.price.isNotBlank()) Text("Preu: ${ev.price} €", fontSize = 13.sp)
+                            when {
+                                !ev.ticketAvailable -> Text("No hi ha venda d'entrades disponible.", color = Color.Gray)
+                                IosEventDetailContract.isSafeExternalTicketUrl(ev.ticketUrl) -> {
+                                    Text("Venda externa de l'organitzador.", fontSize = 12.sp, color = Color.Gray)
+                                    Button(onClick = onTickets) { Text("Consultar entrades externes") }
+                                }
+                                ev.ticketUrl.isNotBlank() -> Text("L'enllaç de venda no és segur o no està disponible.", color = Color.Gray)
+                                else -> {
+                                    Text("Venda interna d'L'Agenda", fontSize = 12.sp, color = Color.Gray)
+                                    if (ticketsLoading) CircularProgressIndicator(Modifier.size(22.dp))
+                                    if (ticketOptionsError.isNotBlank()) {
+                                        Text(ticketOptionsError, color = Color(0xFFAD3030), fontSize = 12.sp)
+                                        TextButton(onClick = { ticketsReload++ }) { Text("Tornar a consultar") }
+                                    }
+                                    val validTicketOptions = IosTicketCatalogPolicy.visible(ticketOptions, culturalToday)
+                                    if (ev.isFestival && IosTicketCatalogPolicy.days(validTicketOptions).isNotEmpty()) {
+                                        Row(Modifier.horizontalScroll(rememberScrollState()),
+                                            horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                            FilterChip(selected = ticketsDayFilter.isBlank(),
+                                                onClick = { ticketsDayFilter = "" }, label = { Text("Totes") })
+                                            IosTicketCatalogPolicy.days(validTicketOptions).forEach { day ->
+                                                FilterChip(selected = ticketsDayFilter == day,
+                                                    onClick = { ticketsDayFilter = day },
+                                                    label = { Text(IosUnfilteredFeedPolicy.fullDate(day)) })
+                                            }
+                                        }
+                                    }
+                                    val listed = IosTicketCatalogPolicy.filter(validTicketOptions,
+                                        if (ev.isFestival) ticketsDayFilter else "")
+                                    listed.forEach { option ->
+                                        Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)
+                                            .background(Pale, RoundedCornerShape(9.dp)).padding(10.dp)) {
+                                            Text(option.name, fontWeight = FontWeight.SemiBold)
+                                            Text(if (option.price == 0.0) "Gratuïta" else "${option.price} €",
+                                                fontSize = 12.sp)
+                                            val detail = IosTicketCatalogPolicy.details(option)
+                                            if (detail.isNotBlank()) Text(detail, fontSize = 12.sp)
+                                            option.available?.let { Text(if (it == 0) "Esgotada" else "$it places disponibles", fontSize = 12.sp) }
+                                            Text("Màxim ${IosTicketCatalogPolicy.quantityLimit(option)} per reserva ara", fontSize = 11.sp, color = Color.Gray)
+                                            if (option.saleStartsAt.isNotBlank() || option.saleEndsAt.isNotBlank())
+                                                Text("Venda: ${option.saleStartsAt.ifBlank { "inici no definit" }} — ${option.saleEndsAt.ifBlank { "fi no definit" }}",
+                                                    fontSize = 11.sp, color = Color.Gray)
+                                        }
+                                    }
+                                    if (!ticketsLoading && ticketOptionsError.isBlank() && validTicketOptions.isEmpty())
+                                        Text("No hi ha modalitats d'entrada disponibles.", fontSize = 12.sp)
+                                    Button(enabled = ev.ticketAvailable && !ticketsLoading && ticketOptionsError.isBlank() &&
+                                        validTicketOptions.any(IosTicketCatalogPolicy::selectable), onClick = onTickets) {
+                                        Text("Seleccionar entrades")
+                                    }
+                                }
+                            }
                         }
                         "Ubicació" -> {
-                            Text("Ubicació", fontSize=18.sp, fontWeight=FontWeight.Bold)
+                            Text(ev.venue.ifBlank { ev.town }, fontWeight = FontWeight.Bold)
+                            if (ev.venue.isNotBlank() && ev.town.isNotBlank()) Text(ev.town, fontSize = 13.sp)
                             if (ev.venue.isNotBlank()) {
-                                Text(ev.venue, fontWeight = FontWeight.SemiBold)
                                 TextButton(onClick = { onToggleFollowEntity("VENUE", ev.venue) }) {
                                     Text(if (followsEntity("VENUE", ev.venue)) "✓ Seguint esta sala" else "+ Seguir esta sala")
                                 }
                             }
-                            if (locationChoices.isEmpty()) Text("Ubicació pendent de confirmar",fontSize=13.sp,color=Color.Gray)
-                            locationChoices.forEach { place ->
-                                Surface(shape=RoundedCornerShape(12.dp), color=Color.White,
-                                    border=BorderStroke(1.dp, Color(0xFFE7E7E7)),
-                                    modifier=Modifier.fillMaxWidth().padding(vertical=4.dp)
-                                        .clickable { pendingDirections = place }) {
-                                    Row(Modifier.padding(12.dp),verticalAlignment=Alignment.CenterVertically) {
-                                        AgendaGlyph("pin",Modifier.size(20.dp),AgendaGold)
-                                        Spacer(Modifier.width(9.dp))
-                                        Text(place,Modifier.weight(1f),fontSize=13.sp)
-                                        Text("Com arribar",fontSize=11.sp,fontWeight=FontWeight.SemiBold)
-                                    }
+                            if (ev.comarca.isNotBlank()) Text(ev.comarca, fontSize = 12.sp, color = Color.Gray)
+                            val places = if (ev.isFestival) IosFestivalPopupPolicy.places(ev.venue, ev.town, festivalProgramme)
+                                else listOfNotNull(IosEventDetailContract.placeQuery(ev.venue, ev.town)
+                                    .takeIf(String::isNotBlank)?.let { ev.venue.ifBlank { ev.town } to it })
+                            if (places.isEmpty()) {
+                                Text("L'organització no ha publicat una ubicació verificable.", fontSize = 12.sp)
+                            } else places.forEach { (name, search) ->
+                                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically) {
+                                    Text(name, modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                    TextButton(onClick = { mapDestination = search }) { Text("Com arribar") }
                                 }
                             }
                         }
                         "Comunitat" -> {
-                            Text("Taulons d'este esdeveniment", fontWeight = FontWeight.Bold)
-                            Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                                Button(onClick = onCommunity, modifier = Modifier.fillMaxWidth()) { Text("Obrir Comunitat") }
-                                OutlinedButton(onClick = onCreateGroup, modifier = Modifier.fillMaxWidth()) { Text("Crear tauló") }
+                            Text("Taulons d'este esdeveniment", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                            if (userId == null) {
+                                Text("Connectant el perfil de convidat…", fontSize = 12.sp, color = Color.Gray)
+                            } else {
+                                if (communityLoading) CircularProgressIndicator(Modifier.size(22.dp))
+                                if (communityError.isNotBlank()) {
+                                    Text(communityError, fontSize = 12.sp, color = Color(0xFFAD3030))
+                                    TextButton(onClick = { communityReload++ }) { Text("Tornar a consultar") }
+                                }
+                                if (!communityLoading && communityError.isBlank() && eventGroups.isEmpty()) {
+                                    Text("Encara no hi ha taulons per a este esdeveniment.", fontSize = 12.sp, color = Color.Gray)
+                                }
+                                eventGroups.forEach { group ->
+                                    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                        .border(1.dp, Color(0xFFE4E4E4), RoundedCornerShape(12.dp))
+                                        .clickable { onOpenCommunityGroup(group) }.padding(11.dp)) {
+                                        Text(group.title, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                        Text(IosEventDetailContract.communityTypeLabel(group.type) +
+                                            " · " + if (group.access == "OPEN") "Obert" else "Amb aprovació",
+                                            fontSize = 11.sp, color = Color.Gray)
+                                        if (group.description.isNotBlank()) Text(group.description, fontSize = 12.sp,
+                                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        if (group.participants > 0) Text("${group.participants} participants", fontSize = 11.sp)
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(onClick = onCreateGroup, modifier = Modifier.weight(1f)) { Text("Crear tauló") }
+                                    OutlinedButton(onClick = onCommunity, modifier = Modifier.weight(1f)) {
+                                        Text("Veure tots")
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        }
     }
-    pendingDirections?.let { place ->
-        AlertDialog(onDismissRequest = { pendingDirections = null },
-            title = { Text("Obrir indicacions externes?") },
-            text = { Text("S'obrirà Mapes fora de l'Agenda per a anar a $place.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    pendingDirections = null
-                    platformOpenExternal("https://maps.apple.com/?q=${place.encodeURLParameter()}")
-                }) { Text("Obrir Mapes") }
-            },
-            dismissButton = { TextButton(onClick = { pendingDirections = null }) { Text("Cancel·lar") } }
-        )
-    }
+    if (servicesOpen) IosSpecialServicesDialog(batecApi, ev.id,
+        onLogin = onBatecSignIn, onDismiss = { servicesOpen = false })
+    if (showBatecManager) BatecManagementDialog(
+        eventId = ev.id, api = batecApi, ownerId = userId, canPublish = canPublishBatec,
+        onSignIn = onBatecSignIn, onChanged = onBatecsChanged,
+        onDismiss = { showBatecManager = false }
+    )
     if (showPoster) Dialog(onDismissRequest = { showPoster = false }) {
         Box(Modifier.fillMaxWidth().fillMaxHeight(0.85f).clickable { showPoster = false }) {
             Poster(ev.posterUrl, Modifier.fillMaxSize())
         }
     }
-}
-
-/** Festival schedule is the Artistes tab in Android. We never fabricate a slot's day/time. */
-@Composable
-private fun IosFestivalSchedulePanel(
-    event: AgendaEventSummary,
-    schedule: List<AgendaScheduleEntry>,
-    loading: Boolean,
-    loadFailed: Boolean,
-    onRetry: () -> Unit,
-    visibleDays: List<String>,
-    selectedDay: String,
-    matchedArtist: String,
-    savedSlots: Set<String>,
-    onToggleSlot: (AgendaScheduleEntry) -> Unit,
-    onSelectDay: (String) -> Unit,
-    onArtist: (String) -> Unit,
-    followsEntity: (String, String) -> Boolean,
-    onToggleFollowEntity: (String, String) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var onlyMine by remember(event.id, selectedDay) { mutableStateOf(false) }
-    val allRows = remember(event.id, schedule, selectedDay, visibleDays) {
-        schedule.distinctBy { IosFestivalSavedSlotPolicy.key(event.id,it.date,it.time,it.artist,it.title) }
-            .filter { it.date.take(10) in visibleDays && (selectedDay.isBlank() || it.date.take(10) == selectedDay) }
-            .sortedWith(compareBy<AgendaScheduleEntry> { it.time.ifBlank { "99:99" } }
-                .thenBy { it.artist.ifBlank { it.title } })
-    }
-    val rows = if (onlyMine) allRows.filter { row ->
-        IosFestivalSavedSlotPolicy.key(event.id,row.date,row.time,row.artist,row.title) in savedSlots
-    } else allRows
-    val matchedKey = IosEventPopupPolicy.artistKey(matchedArtist)
-    val focusedIndex = if (onlyMine || matchedKey.isBlank()) -1 else rows.indexOfFirst { row ->
-        IosEventPopupPolicy.artistKey(row.artist.ifBlank { row.title }) == matchedKey
-    }
-    val listState = rememberLazyListState()
-    LaunchedEffect(event.id, selectedDay, matchedKey, focusedIndex, onlyMine) {
-        if (focusedIndex >= 0) listState.scrollToItem(focusedIndex + 2)
-        else listState.scrollToItem(0)
-    }
-    LazyColumn(modifier = modifier.fillMaxWidth(), state = listState,
-        contentPadding = PaddingValues(start = 15.dp, end = 15.dp, top = 10.dp, bottom = 26.dp),
-        verticalArrangement = Arrangement.spacedBy(9.dp)) {
-        item(key = "jornades") {
-            if (visibleDays.size > 1) {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    contentPadding = PaddingValues(vertical = 4.dp)) {
-                    items(visibleDays, key = { it }) { day ->
-                        FilterChip(selected = selectedDay == day, onClick = { onSelectDay(day) },
-                            label = { Text(IosUnfilteredFeedPolicy.fullDate(day),fontSize=12.sp) })
-                    }
-                }
-            } else if (visibleDays.size == 1) {
-                Text(IosUnfilteredFeedPolicy.fullDate(visibleDays.first()),
-                    fontWeight = FontWeight.Bold, fontSize = 17.sp)
-            }
-        }
-        item(key = "controls") {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Programació", modifier = Modifier.weight(1f),
-                    fontWeight = FontWeight.ExtraBold, fontSize = 18.sp)
-                Surface(shape = RoundedCornerShape(50), color=Color.White,
-                    border=BorderStroke(1.dp,Color(0xFFE7E7E7))) {
-                    Row(Modifier.padding(3.dp), horizontalArrangement=Arrangement.spacedBy(3.dp)) {
-                        listOf(false to "Tots",true to "Els meus").forEach { (mine,label) ->
-                            Surface(shape=RoundedCornerShape(30.dp),
-                                color=if (mine==onlyMine) Color(0xFFFFF7E6) else Color.White,
-                                modifier=Modifier.clickable { onlyMine=mine }) {
-                                Text(label,Modifier.padding(horizontal=9.dp,vertical=6.dp),
-                                    fontSize=11.sp,fontWeight=if (mine==onlyMine) FontWeight.Bold else FontWeight.Normal)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if (rows.isEmpty()) {
-            item(key = "sense_programacio") {
-                val hasArtist = IosEventPopupPolicy.isArtistInFestival(event, matchedArtist)
-                Text(when {
-                    onlyMine -> "Encara no has guardat cap actuació d'esta jornada."
-                    loading -> "Carregant la programació…"
-                    loadFailed -> "No s'ha pogut carregar la programació. Torna-ho a intentar."
-                    visibleDays.isEmpty() && schedule.isNotEmpty() -> "Totes les jornades publicades ja han passat."
-                    hasArtist -> "$matchedArtist figura al cartell, però encara no hi ha dia ni hora confirmats."
-                    else -> "Programació pendent de publicar per a esta jornada."
-                }, modifier=Modifier.padding(vertical=12.dp),fontSize=13.sp,color=Color.Gray)
-                if (loadFailed) TextButton(onClick=onRetry) { Text("Tornar a intentar") }
-            }
-            if (!loading && !onlyMine && visibleDays.isEmpty() && schedule.isEmpty()) {
-                val artists = event.artists.distinctBy(IosEventPopupPolicy::artistKey)
-                items(artists, key = { "lineup_" + IosEventPopupPolicy.artistKey(it) }) { name ->
-                    val artistPhoto = IosPersonalizationImages.photo(IosPersonalizationImages.cached(),"ARTIST",name)
-                    Row(Modifier.fillMaxWidth().background(Color(0xFFFAFAFA),RoundedCornerShape(13.dp))
-                        .padding(11.dp),verticalAlignment=Alignment.CenterVertically) {
-                        Poster(artistPhoto,Modifier.size(54.dp).clip(RoundedCornerShape(10.dp)))
-                        Spacer(Modifier.width(9.dp))
-                        Text(name,Modifier.weight(1f).clickable { onArtist(name) },fontWeight=FontWeight.Bold,fontSize=14.sp)
-                        TextButton(onClick={onToggleFollowEntity("ARTIST",name)}) {
-                            Text(if(followsEntity("ARTIST",name)) "✓ Seguint" else "+ Seguir",fontSize=11.sp)
-                        }
-                    }
-                }
-            }
-        }
-        itemsIndexed(rows, key = { _,row -> IosFestivalSavedSlotPolicy.key(event.id,row.date,row.time,row.artist,row.title) }) { _,slot ->
-            val name = slot.artist.ifBlank { slot.title }
-            val knownArtist = slot.artist.isNotBlank() || event.artists.any {
-                IosEventPopupPolicy.artistKey(it) == IosEventPopupPolicy.artistKey(name)
-            }
-            val match = matchedKey.isNotBlank() && IosEventPopupPolicy.artistKey(name)==matchedKey
-            val key = IosFestivalSavedSlotPolicy.key(event.id,slot.date,slot.time,slot.artist,slot.title)
-            val isSaved = key in savedSlots
-            Surface(color=Color.White,shape=RoundedCornerShape(13.dp),
-                border=BorderStroke(if(match) 2.dp else 1.dp,
-                    if(match || isSaved) AgendaGold else Color(0xFFE7E7E7))) {
-                Row(Modifier.fillMaxWidth().padding(10.dp),verticalAlignment=Alignment.CenterVertically,
-                    horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    val artistPhoto=IosPersonalizationImages.photo(IosPersonalizationImages.cached(),"ARTIST",name)
-                    Poster(artistPhoto,Modifier.size(54.dp).clip(RoundedCornerShape(10.dp)))
-                    Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(3.dp)) {
-                        if (slot.time.isNotBlank()) Text("${slot.time} h",color=AgendaGold,
-                            fontWeight=FontWeight.Bold,fontSize=12.sp)
-                        Text(name,Modifier.then(if (knownArtist) Modifier.clickable { onArtist(name) } else Modifier),fontSize=14.sp,
-                            fontWeight=if(match) FontWeight.ExtraBold else FontWeight.SemiBold)
-                        if (slot.title.isNotBlank() && IosEventPopupPolicy.artistKey(slot.title) != IosEventPopupPolicy.artistKey(name))
-                            Text(slot.title,fontSize=12.sp)
-                        if (slot.location.isNotBlank()) Text(slot.location,fontSize=11.sp,color=Color.Gray)
-                    }
-                    Column(horizontalAlignment=Alignment.End) {
-                        if (knownArtist) TextButton(onClick={onToggleFollowEntity("ARTIST",name)}) {
-                            Text(if(followsEntity("ARTIST",name)) "✓ Seguint" else "+ Seguir",fontSize=10.sp)
-                        }
-                        TextButton(onClick={onToggleSlot(slot)}) {
-                            Text(if(isSaved) "✓ Guardat" else "+ Guardar",fontSize=10.sp)
-                        }
-                    }
-                }
-            }
-        }
+    if (mapDestination.isNotBlank()) {
+        AlertDialog(onDismissRequest = { mapDestination = "" },
+            title = { Text("Obrir les indicacions?") },
+            text = { Text("S'obrirà Mapes fora de L'Agenda per a esta ubicació.") },
+            confirmButton = { TextButton(onClick = {
+                val dest = mapDestination
+                mapDestination = ""
+                platformOpenExternal("https://maps.apple.com/?q=${dest.encodeURLParameter()}")
+            }) { Text("Obrir Mapes") } },
+            dismissButton = { TextButton(onClick = { mapDestination = "" }) { Text("Cancel·lar") } })
     }
 }
-
 @Composable
-private fun ArtistDialog(name: String, followed: Boolean, concerts: List<AgendaEventSummary>,
-                         onFollow: () -> Unit, bell: IosArtistBell?, onBell: () -> Unit,
+private fun ArtistDialog(api: IosAgendaApi, name: String, followed: Boolean, concerts: List<AgendaEventSummary>,
+                         onLogin: () -> Unit, onStorePaid: () -> Unit,
+                         publicPage: IosArtistPublicPage?, pageLoading: Boolean, pageError: String,
+                         onRetryPage: () -> Unit, onFollow: () -> Unit,
+                         bell: IosArtistBell?, onBell: () -> Unit,
                          onDismiss: () -> Unit, onEvent: (AgendaEventSummary) -> Unit) {
-    // Artist search platforms mirror Android, but these are SEARCH links, not claimed official profiles.
-    val firstEvent = concerts.firstOrNull()
-    val discipline = concerts.map { it.category }.filter(String::isNotBlank)
-        .groupingBy { it }.eachCount().maxByOrNull { it.value }?.key.orEmpty()
-    val platforms = if (discipline.contains("musi", true)) {
+    var selectedStoreProduct by remember(name) { mutableStateOf<IosArtistProduct?>(null) }
+    var donationOpen by remember(name) { mutableStateOf(false) }
+    val discipline = IosArtistPagePolicy.discipline(concerts.map { it.category })
+    val photo = publicPage?.profile?.imageUrl.orEmpty()
+    val style = publicPage?.profile?.style.orEmpty()
+    // Search links are not represented as official artist-controlled profiles.
+    val platforms = if (IosArtistPagePolicy.isMusic(discipline)) {
         val query = name.encodeURLParameter()
-        listOf(
-            "Spotify" to "https://open.spotify.com/search/$query",
+        listOf("Spotify" to "https://open.spotify.com/search/$query",
             "YouTube Music" to "https://music.youtube.com/search?q=$query",
             "Apple Music" to "https://music.apple.com/es/search?term=$query",
             "Deezer" to "https://www.deezer.com/search/$query",
             "TIDAL" to "https://listen.tidal.com/search?q=$query",
-            "Bandcamp" to "https://bandcamp.com/search?q=$query"
-        )
+            "Bandcamp" to "https://bandcamp.com/search?q=$query")
     } else emptyList()
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(20.dp), color = Color.White,
-            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.90f)) {
-            Column {
-                Box(Modifier.fillMaxWidth().height(170.dp)) {
-                    // Until we retrieve an artist-owned photo, don't mislabel an event poster as a profile photograph.
-                    Poster(firstEvent?.posterUrl.orEmpty(), Modifier.fillMaxSize())
-                    if (discipline.isNotBlank()) {
-                        Text(discipline, color = Ink, fontSize = 11.sp,
-                            modifier = Modifier.align(Alignment.TopEnd).padding(10.dp)
-                                .background(Color.White.copy(alpha = 0.88f), RoundedCornerShape(8.dp)).padding(7.dp))
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.92f)) {
+            LazyColumn(contentPadding = PaddingValues(bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                item {
+                    Box(Modifier.fillMaxWidth().height(224.dp)
+                        .background(Color(0xFFF0ECF4), RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))) {
+                        if (photo.isNotBlank()) {
+                            AsyncImage(model = if (photo.startsWith("/"))
+                                IosServerConnection.SITE_BASE + photo else photo,
+                                contentDescription = "Fotografia de $name",
+                                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        } else {
+                            // Never mislabel a festival poster as a portrait of one artist.
+                            Text(name.take(2).uppercase(), fontSize = 48.sp, color = Ink.copy(alpha = .35f),
+                                modifier = Modifier.align(Alignment.Center))
+                        }
+                        if (discipline.isNotBlank()) Text(discipline.replaceFirstChar { it.uppercase() },
+                            color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                            modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)
+                                .background(Ink.copy(alpha = .75f), RoundedCornerShape(9.dp))
+                                .padding(horizontal = 9.dp, vertical = 6.dp))
+                        TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.TopStart)
+                            .padding(6.dp).background(Color.White.copy(alpha = .90f), CircleShape)) {
+                            Text("×", color = Ink, fontSize = 22.sp)
+                        }
                     }
                 }
-                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 5.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Button(onClick = onFollow) { Text(if (followed) "✓ Seguint" else "+ Seguir") }
-                    OutlinedButton(onClick = onBell) {
-                        Text(if (bell != null) "🔔 ${IosArtistBellPolicy.label(bell.frequency)}" else "🔔 Avisos")
+                item {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Button(onClick = onFollow, modifier = Modifier.weight(1f)) {
+                            Text(if (followed) "✓ Seguint" else "+ Seguir")
+                        }
+                        OutlinedButton(onClick = onBell, modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 7.dp)) {
+                            Text(if (bell != null) "🔔 ${IosArtistBellPolicy.label(bell.frequency)}" else "🔔 Notificacions",
+                                fontSize = 11.sp, maxLines = 1)
+                        }
                     }
-                    TextButton(onClick = onDismiss) { Text("×") }
                 }
-                Text(name, fontSize = 22.sp, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
-                if (platforms.isNotEmpty()) {
-                    Text("Buscar música", fontSize = 11.sp, color = Color.Gray,
-                        modifier = Modifier.padding(start = 16.dp, top = 4.dp))
-                    LazyRow(contentPadding = PaddingValues(horizontal = 14.dp),
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        items(platforms) { (label, url) ->
-                            OutlinedButton(onClick = { platformOpenExternal(url) },
-                                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp)) {
-                                Text(label, fontSize = 10.sp, maxLines = 1)
+                item {
+                    Column(Modifier.padding(horizontal = 17.dp, vertical = 2.dp)) {
+                        Text(name, fontSize = 25.sp, fontWeight = FontWeight.Black, color = Ink)
+                        if (style.isNotBlank()) Text(style, fontSize = 12.sp, color = Color.Gray)
+                        if (pageLoading) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
+                        if (pageError.isNotBlank()) {
+                            Text(pageError, color = Color(0xFF9C3535), fontSize = 12.sp)
+                            TextButton(onClick = onRetryPage) { Text("Reintentar la fitxa") }
+                        }
+                    }
+                }
+                if (platforms.isNotEmpty()) item {
+                    Column {
+                        Text("Buscar música", fontSize = 11.sp, color = Color.Gray,
+                            modifier = Modifier.padding(start = 17.dp))
+                        LazyRow(contentPadding = PaddingValues(horizontal = 14.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            items(platforms) { (label, url) ->
+                                OutlinedButton(onClick = { platformOpenExternal(url) },
+                                    contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp)) {
+                                    Text(label, fontSize = 10.sp, maxLines = 1)
+                                }
                             }
                         }
                     }
                 }
-                LazyColumn(contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item { Text(if (platforms.isNotEmpty()) "Concerts" else "Activitats",
-                        fontWeight = FontWeight.Bold, fontSize = 17.sp) }
-                    if (concerts.isEmpty()) item { Text("No hi ha activitats futures en el catàleg.", color = Color.Gray) }
-                    items(concerts.distinctBy { it.key }, key = { it.key }) { ev ->
+                item { Text(IosArtistPagePolicy.activityHeading(discipline),
+                    fontWeight = FontWeight.Black, fontSize = 19.sp,
+                    modifier = Modifier.padding(start = 17.dp, top = 8.dp)) }
+                if (concerts.isEmpty()) item {
+                    Text("No hi ha activitats futures publicades.",
+                        modifier = Modifier.padding(horizontal = 17.dp), color = Color.Gray, fontSize = 12.sp)
+                }
+                items(concerts.distinctBy { it.id }, key = { "artist_event_${it.id}" }) { ev ->
+                    Box(Modifier.padding(horizontal = 12.dp)) {
                         EventCard(ev, isSaved = false, onClick = { onEvent(ev) }, trailing = {})
                     }
-                    // Products require a real artist-owned merchandise endpoint; no invented items or payments.
-                    item {
-                        Spacer(Modifier.height(7.dp))
-                        Text("Productes", fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                        Text("Catàleg de productes encara no disponible a iOS.",
-                            color = Color.Gray, fontSize = 12.sp)
+                }
+                if (IosArtistPagePolicy.isMusic(discipline)) item {
+                    OutlinedButton(onClick = { donationOpen = true },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 17.dp)) {
+                        Text("Donacions a l'artista")
+                    }
+                }
+                if (IosArtistPagePolicy.isMusic(discipline) || !publicPage?.products.isNullOrEmpty()) {
+                    item { Text("Productes", fontWeight = FontWeight.Black, fontSize = 19.sp,
+                        modifier = Modifier.padding(start = 17.dp, top = 9.dp)) }
+                    when {
+                        pageLoading -> item { Text("Carregant productes...",
+                            modifier = Modifier.padding(horizontal = 17.dp), color = Color.Gray) }
+                        publicPage?.storeMessage?.isNotBlank() == true -> item {
+                            Text(publicPage.storeMessage, color = Color.Gray, fontSize = 12.sp,
+                                modifier = Modifier.padding(horizontal = 17.dp))
+                            TextButton(onClick = onRetryPage) { Text("Reintentar") }
+                        }
+                        publicPage?.products.isNullOrEmpty() -> item {
+                            Text("No hi ha productes publicats per a este artista.", color = Color.Gray,
+                                fontSize = 12.sp, modifier = Modifier.padding(horizontal = 17.dp))
+                        }
+                        else -> items(publicPage!!.products.filter { it.active }, key = { "product_${it.id}" }) { product ->
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 17.dp, vertical = 5.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (product.imageUrl.isNotBlank()) AsyncImage(
+                                    model = if (product.imageUrl.startsWith("/"))
+                                        IosServerConnection.SITE_BASE + product.imageUrl else product.imageUrl,
+                                    contentDescription = product.name,
+                                    modifier = Modifier.size(64.dp).clip(RoundedCornerShape(8.dp)),
+                                    contentScale = ContentScale.Crop)
+                                Column(Modifier.weight(1f)) {
+                                    Text(product.name, fontWeight = FontWeight.SemiBold)
+                                    if (product.description.isNotBlank()) Text(product.description,
+                                        maxLines = 2, fontSize = 11.sp, color = Color.Gray)
+                                    Text(IosArtistPagePolicy.money(product.priceCents),
+                                        fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                    if (!IosArtistPagePolicy.inStock(product.stock))
+                                        Text("Esgotat", color = Color.Gray, fontSize = 11.sp)
+                                    else OutlinedButton(onClick = { selectedStoreProduct = product }) {
+                                        Text("Comprar")
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+    if (donationOpen) IosArtistDonationCheckout(api, name,
+        onLogin = { donationOpen = false; onLogin() }, onDismiss = { donationOpen = false })
+    selectedStoreProduct?.let { product ->
+        IosArtistStoreCheckout(api, product,
+            onClose = { selectedStoreProduct = null },
+            onLogin = { selectedStoreProduct = null; onLogin() },
+            onPaid = { selectedStoreProduct = null; onStorePaid() })
     }
 }
 
@@ -3335,6 +3589,198 @@ private fun ArtistBellEditorDialog(artist: String, current: IosArtistBell?,
         })
 }
 
+/** Pas 20: manual Batecs are owned by the PHP server, never cached as personal phone data.
+ * The editor uses explicit online-only writes because create.php has no idempotency key.
+ */
+@Composable
+private fun BatecManagementDialog(
+    eventId: Int, api: IosAgendaApi, ownerId: Int?, canPublish: Boolean,
+    onSignIn: () -> Unit, onChanged: () -> Unit, onDismiss: () -> Unit
+) {
+    var items by remember(eventId, ownerId) { mutableStateOf(emptyList<IosManualBatec>()) }
+    var eligibility by remember(eventId, ownerId) { mutableStateOf<IosBatecEligibility?>(null) }
+    var busy by remember(eventId, ownerId) { mutableStateOf(false) }
+    var message by remember(eventId, ownerId) { mutableStateOf("") }
+    var editingId by remember(eventId, ownerId) { mutableStateOf<Int?>(null) }
+    var deletingId by remember(eventId, ownerId) { mutableStateOf<Int?>(null) }
+    var title by remember(eventId, ownerId) { mutableStateOf("") }
+    var body by remember(eventId, ownerId) { mutableStateOf("") }
+    var refresh by remember(eventId, ownerId) { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(eventId, ownerId, canPublish, refresh) {
+        val next = runCatching { api.eventBatecs(eventId) }
+        next.onSuccess { items = it }.onFailure { message = it.message ?: "No s'han pogut carregar els Batecs" }
+        if (canPublish) {
+            runCatching { api.batecEligibility(eventId) }
+                .onSuccess { eligibility = it }
+                .onFailure { eligibility = null; message = it.message ?: "No es poden comprovar els permisos" }
+        } else eligibility = null
+    }
+    Dialog(onDismissRequest = { if (!busy) onDismiss() }) {
+        Surface(shape = RoundedCornerShape(18.dp), color = Color.White,
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(.82f)) {
+            Column(Modifier.fillMaxSize().padding(15.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Batecs de l'esdeveniment", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                    TextButton(onClick = onDismiss, enabled = !busy) { Text("Tancar") }
+                }
+                if (message.isNotBlank()) Text(message, color = Color(0xFF925100), fontSize = 12.sp)
+                if (editingId != null) {
+                    Text(if (editingId == 0) "Publicar un Batec" else "Editar un Batec", fontWeight = FontWeight.Bold)
+                    OutlinedTextField(value = title, onValueChange = { title = it.take(120) },
+                        label = { Text("Títol") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    OutlinedTextField(value = body, onValueChange = { body = it.take(1000) },
+                        label = { Text("Text") }, modifier = Modifier.fillMaxWidth(), maxLines = 5)
+                    Row {
+                        TextButton(onClick = { editingId = null }, enabled = !busy) { Text("Cancel·lar") }
+                        Button(onClick = {
+                            val currentId = editingId ?: return@Button
+                            busy = true
+                            scope.launch {
+                                val result = runCatching {
+                                    if (currentId == 0) api.createBatec(eventId, title, body)
+                                    else api.updateBatec(currentId, eventId, title, body)
+                                }
+                                result.onSuccess {
+                                    editingId = null; message = "Batec guardat al servidor"
+                                    refresh += 1; onChanged()
+                                }.onFailure { message = it.message ?: "No s'ha guardat el Batec" }
+                                busy = false
+                            }
+                        }, enabled = !busy && title.isNotBlank()) { Text("Guardar") }
+                    }
+                } else {
+                    if (!canPublish) {
+                        OutlinedButton(onClick = onSignIn) { Text("Inicia sessió per publicar un Batec") }
+                    } else {
+                        val permission = eligibility
+                        if (permission == null) Text("Comprovant autorització…", fontSize = 12.sp)
+                        else if (permission.allowed) Button(onClick = {
+                            editingId = 0; title = ""; body = ""; message = ""
+                        }) { Text("+ Crear Batec") }
+                        else Text(permission.reason.ifBlank { "No es pot publicar ara" }, fontSize = 12.sp)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                        if (items.isEmpty()) Text("No hi ha Batecs publicats.", color = Color.Gray)
+                        items.forEach { item ->
+                            Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)
+                                .background(Pale, RoundedCornerShape(10.dp)).padding(10.dp)) {
+                                Text(item.title, fontWeight = FontWeight.SemiBold)
+                                if (item.body.isNotBlank()) Text(item.body, fontSize = 12.sp)
+                                Text(item.author, fontSize = 11.sp, color = Color.Gray)
+                                if (item.canEdit && canPublish) {
+                                    Row {
+                                        TextButton(onClick = {
+                                            editingId = item.id; title = item.title; body = item.body; message = ""
+                                        }, enabled = !busy) { Text("Editar") }
+                                        TextButton(onClick = { deletingId = item.id }, enabled = !busy) { Text("Eliminar") }
+                                    }
+                                }
+                                if (deletingId == item.id) {
+                                    Text("Eliminar este Batec definitivament?", fontSize = 12.sp)
+                                    Row {
+                                        TextButton(onClick = { deletingId = null }) { Text("Cancel·lar") }
+                                        TextButton(enabled = !busy, onClick = {
+                                            busy = true
+                                            scope.launch {
+                                                runCatching { api.deleteBatec(item.id, eventId) }
+                                                    .onSuccess { deletingId = null; message = "Batec eliminat del servidor"
+                                                        refresh += 1; onChanged() }
+                                                    .onFailure { message = it.message ?: "No s'ha pogut eliminar" }
+                                                busy = false
+                                            }
+                                        }) { Text("Confirmar eliminació") }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Exact Android v336 seeded palettes; no image files or local user state. */
+private fun batecArtistBrush(seed: String): Brush {
+    val palettes = listOf(
+        listOf(Color(0xFF833AB4), Color(0xFFF77737)),
+        listOf(Color(0xFF0052D4), Color(0xFF65C7F7)),
+        listOf(Color(0xFF11998E), Color(0xFF38EF7D)),
+        listOf(Color(0xFFDA4453), Color(0xFF89216B)),
+        listOf(Color(0xFFF7971E), Color(0xFFFFD200)),
+        listOf(Color(0xFF232526), Color(0xFF414345)),
+        listOf(Color(0xFF614385), Color(0xFF516395)),
+        listOf(Color(0xFF1D4350), Color(0xFFA43931))
+    )
+    return Brush.linearGradient(palettes[(seed.hashCode() and Int.MAX_VALUE) % palettes.size])
+}
+
+private fun batecStoryRingBrush(seed: String): Brush = Brush.sweepGradient(
+    listOf(Color(0xFFFCAF45), Color(0xFFFD1D1D),
+        if (seed.hashCode() % 2 == 0) Color(0xFF833AB4) else Color(0xFFFD1D1D),
+        Color(0xFFFCAF45))
+)
+
+/** Android v336 story bubble: artist ring, grey seen state, count and followed dot. */
+@Composable
+private fun BatecBubble(
+    group: IosBatecArtistGroup,
+    photoUrl: String,
+    onClick: () -> Unit
+) {
+    val grey = group.allSeen
+    val ring = if (grey) Brush.linearGradient(listOf(Color(0xFF9E9E9E), Color(0xFFBDBDBD)))
+               else batecStoryRingBrush(group.artist)
+    val interior = if (grey) Brush.linearGradient(listOf(Color(0xFF757575), Color(0xFFB0B0B0)))
+                   else batecArtistBrush(group.artist)
+    Column(
+        modifier = Modifier.width(64.dp).clickable(onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier.size(54.dp).border(2.dp, ring, CircleShape)
+                .padding(3.dp).clip(CircleShape).background(interior),
+            contentAlignment = Alignment.Center
+        ) {
+            if (photoUrl.isNotBlank()) {
+                AsyncImage(
+                    model = photoUrl,
+                    contentDescription = "Batec de ${group.artist}",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                    colorFilter = if (grey) ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) }) else null
+                )
+            } else {
+                val initials = group.artist.split(" ").filter(String::isNotBlank).take(2)
+                    .joinToString("") { it.first().uppercaseChar().toString() }
+                Text(initials, color = Color.White, fontWeight = FontWeight.Black, fontSize = 15.sp)
+            }
+            if (group.storyKeys.size > 1) {
+                Box(
+                    modifier = Modifier.align(Alignment.TopEnd).size(18.dp)
+                        .background(Color.White, CircleShape).border(1.dp, Color.LightGray, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(if (group.storyKeys.size > 99) "99+" else group.storyKeys.size.toString(),
+                        color = Ink, fontSize = if (group.storyKeys.size > 99) 7.sp else 9.sp,
+                        fontWeight = FontWeight.Black)
+                }
+            }
+            // Every story here belongs to a followed artist; Android marks this in blue.
+            Box(
+                modifier = Modifier.align(Alignment.BottomEnd).size(13.dp)
+                    .background(Color(0xFF1D9BF0), CircleShape)
+                    .border(2.dp, Color.White, CircleShape)
+            )
+        }
+        Spacer(Modifier.height(3.dp))
+        Text(group.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 10.sp,
+            color = if (grey) Ink.copy(alpha = .48f) else Ink)
+    }
+}
+
 /** One artist per visual Batec, with stories and current concerts inside its viewer. */
 @Composable
 private fun BatecViewer(
@@ -3342,6 +3788,8 @@ private fun BatecViewer(
     selectedKey: String,
     stories: List<IosBatec>,
     allEvents: List<AgendaEventSummary>,
+    isFollowed: (String) -> Boolean,
+    onToggleFollow: (String) -> Unit,
     onDismiss: () -> Unit,
     onOpenEvent: (Int) -> Unit,
     onGroupChanged: (IosBatecArtistGroup) -> Unit
@@ -3363,11 +3811,10 @@ private fun BatecViewer(
     var replayEpoch by remember(selectedKey) { mutableIntStateOf(0) }
     var progress by remember(selectedKey, replayEpoch) { mutableFloatStateOf(0f) }
     fun go(delta: Int) {
-        if (delta < 0 && selectedIndex == 0) {
-            replayEpoch += 1 // Android restarts the first Batec instead of closing.
-        } else {
-            val next = IosBatecNavigationPolicy.move(selectedIndex, groups.size, delta)
-            if (next == null) onDismiss() else onGroupChanged(groups[next])
+        when (val action = IosBatecNavigationPolicy.navigate(selectedIndex, groups.size, delta)) {
+            IosBatecNavigationPolicy.Navigation.Restart -> replayEpoch += 1
+            IosBatecNavigationPolicy.Navigation.Close -> onDismiss()
+            is IosBatecNavigationPolicy.Navigation.Select -> onGroupChanged(groups[action.index])
         }
     }
     LaunchedEffect(selectedKey, replayEpoch) {
@@ -3381,15 +3828,14 @@ private fun BatecViewer(
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(24.dp), color = Color(0xFF1D1921),
-            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.89f)
+            modifier = Modifier.fillMaxWidth().aspectRatio(9f / 16f)
         ) {
             var horizontalDrag by remember(selectedKey) { mutableFloatStateOf(0f) }
             Box(
                 Modifier.fillMaxSize()
                     .pointerInput(selectedKey, groups.size) {
                         detectTapGestures { p ->
-                            if (p.x < size.width * 0.24f) go(-1)
-                            else if (p.x > size.width * 0.76f) go(1)
+                            go(IosBatecNavigationPolicy.tapDirection(p.x, size.width.toFloat()))
                         }
                     }
                     .pointerInput(selectedKey, groups.size) {
@@ -3397,24 +3843,21 @@ private fun BatecViewer(
                             onDragStart = { horizontalDrag = 0f },
                             onHorizontalDrag = { change, delta -> horizontalDrag += delta; change.consume() },
                             onDragEnd = {
-                                when {
-                                    horizontalDrag < -56.dp.toPx() -> go(1)
-                                    horizontalDrag > 56.dp.toPx() -> go(-1)
-                                }
+                                val direction = IosBatecNavigationPolicy.swipeDirection(horizontalDrag, 56.dp.toPx())
+                                if (direction != 0) go(direction)
                                 horizontalDrag = 0f
                             },
                             onDragCancel = { horizontalDrag = 0f }
                         )
                     }
             ) {
-                Poster(
-                    representative.imageUrl.ifBlank { upcoming.firstOrNull()?.posterUrl.orEmpty() },
-                    Modifier.fillMaxSize()
-                )
-                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(
-                    Color.Black.copy(alpha = .60f), Color.Black.copy(alpha = .83f),
-                    Color.Black.copy(alpha = .92f)
-                ))))
+                val artwork = representative.imageUrl.ifBlank { upcoming.firstOrNull()?.posterUrl.orEmpty() }
+                Box(Modifier.fillMaxSize().background(batecArtistBrush(group.artist)))
+                if (artwork.isNotBlank()) {
+                    AsyncImage(model = artwork, contentDescription = "Batec de ${group.artist}",
+                        modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                }
+                Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .50f)))
                 Column(Modifier.fillMaxSize().padding(14.dp)) {
                     Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(20.dp))
                         .background(Color.White.copy(alpha = .26f))) {
@@ -3430,7 +3873,12 @@ private fun BatecViewer(
                         Column(Modifier.weight(1f)) {
                             Text(group.artist, color = Color.White, fontWeight = FontWeight.Bold,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${group.storyKeys.size} novetat${if (group.storyKeys.size == 1) "" else "s"} · ${selectedIndex + 1}/${groups.size}",
+                            val statusText = when {
+                                groupStories.all { it.sourceType == "FOLLOWED_PLACEHOLDER" } -> "Sense novetats"
+                                groupStories.all { it.sourceType == "EVENT_FALLBACK" } -> "Pròxima actuació"
+                                else -> "${group.storyKeys.size} novetat${if (group.storyKeys.size == 1) "" else "s"}"
+                            }
+                            Text("$statusText · ${selectedIndex + 1}/${groups.size}",
                                 color = Color.White.copy(alpha = .72f), fontSize = 11.sp)
                         }
                         TextButton(onClick = onDismiss) { Text("✕", color = Color.White, fontSize = 20.sp) }
@@ -3473,6 +3921,14 @@ private fun BatecViewer(
                         Text("${groupStories.size} publicacions d’este artista", color = Color.White.copy(alpha = .73f),
                             fontSize = 11.sp, modifier = Modifier.padding(top = 7.dp))
                     }
+                    OutlinedButton(
+                        onClick = { onToggleFollow(group.artist) },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                        border = BorderStroke(1.dp, Color.White.copy(alpha = .65f))
+                    ) {
+                        Text(if (isFollowed(group.artist)) "Seguint" else "Seguir ${group.artist}")
+                    }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = { go(-1) }) { Text("‹ Anterior", color = Color.White) }
@@ -3481,323 +3937,245 @@ private fun BatecViewer(
                         }
                     }
                 }
-                // Large hit areas stay outside the scrollable concert content.
-                Box(Modifier.align(Alignment.CenterStart).width(35.dp).height(88.dp)
-                    .clickable { go(-1) }, contentAlignment = Alignment.Center) {
-                    Text("‹", color = Color.White, fontSize = 36.sp)
+                // Full-height edge targets are above the scrollable content, but below
+                // the toolbar and footer. Back is absent on the first item (tap still replays).
+                if (selectedIndex > 0) {
+                    Box(Modifier.align(Alignment.CenterStart).width(56.dp).fillMaxHeight()
+                        .padding(top = 72.dp, bottom = 48.dp).clickable { go(-1) },
+                        contentAlignment = Alignment.Center) {
+                        Text("‹", modifier = Modifier.background(Color.Black.copy(alpha = .30f), CircleShape)
+                            .padding(horizontal = 9.dp), color = Color.White, fontSize = 36.sp)
+                    }
                 }
-                Box(Modifier.align(Alignment.CenterEnd).width(35.dp).height(88.dp)
-                    .clickable { go(1) }, contentAlignment = Alignment.Center) {
-                    Text("›", color = Color.White, fontSize = 36.sp)
+                Box(Modifier.align(Alignment.CenterEnd).width(56.dp).fillMaxHeight()
+                    .padding(top = 72.dp, bottom = 48.dp).clickable { go(1) },
+                    contentAlignment = Alignment.Center) {
+                    Text("›", modifier = Modifier.background(Color.Black.copy(alpha = .30f), CircleShape)
+                        .padding(horizontal = 9.dp), color = Color.White, fontSize = 36.sp)
                 }
             }
         }
     }
 }
 
-/** Six Android notification tabs, full-height sheet, internal settings and active reminders.
- * Server messages and locally derived alerts remain separately identifiable and read-safe. */
+@Composable
+private fun IosSettingSwitch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical=2.dp),
+        verticalAlignment=Alignment.CenterVertically) {
+        Text(label,Modifier.weight(1f),fontSize=13.sp)
+        Switch(checked=checked,onCheckedChange=onChange)
+    }
+}
+
+/** Android-equivalent full-width notification sheet; no fabricated notifications. */
 @Composable
 private fun NotificationsDialog(
-    notifications: List<IosNotification>, artistBells: List<IosArtistBell>,
-    reminders: List<AgendaEventSummary>, tickets: List<IosTicket>,
-    suggestions: List<AgendaEventSummary>, eventsById: Map<Int, AgendaEventSummary>,
-    today: String, accountId: Int?, api: IosAgendaApi,
-    preferences: IosNotificationPreferences, onPreferencesChange: (IosNotificationPreferences) -> Unit,
-    readLocalIds: Set<String>, dismissedIds: Set<String>,
-    onReadLocal: (String) -> Unit, onDismissAll: (List<String>) -> Unit,
-    onDismiss: () -> Unit, onRead: (IosNotification) -> Unit,
+    notifications: List<IosNotification>,
+    artistBells: List<IosArtistBell>,
+    reminders: List<AgendaEventSummary>,
+    eventsById: Map<Int, AgendaEventSummary>,
+    onDismiss: () -> Unit,
+    onRead: (IosNotification) -> Unit,
     onReminderClick: (AgendaEventSummary) -> Unit,
-    onReminderDisable: (AgendaEventSummary) -> Unit, onArtistBell: (String) -> Unit,
-    onOpenArtist: (String) -> Unit, onArtistDisable: (String) -> Unit,
-    onOpenTickets: () -> Unit, onOpenSuggestion: (AgendaEventSummary) -> Unit,
+    onReminderDisable: (AgendaEventSummary) -> Unit,
+    onArtistBell: (String) -> Unit,
     reminderTime: (AgendaEventSummary) -> String,
-    entries: List<IosNotificationEntry>
+    settings: IosNotificationCenterSettings,
+    isRegistered: Boolean,
+    savingSettings: Boolean,
+    onSaveSettings: (IosNotificationCenterSettings) -> Unit,
+    onClearRead: () -> Unit,
+    onOpenNativeSettings: () -> Unit
 ) {
-    var selectedTab by remember { mutableStateOf(IosNotificationGrouping.GENERAL) }
-    var page by remember { mutableStateOf("Notificacions") }
-    var draft by remember(preferences,page) { mutableStateOf(preferences) }
-    var emailDraft by remember { mutableStateOf(IosEmailPreferences()) }
-    var emailLoaded by remember(accountId) { mutableStateOf(false) }
-    var saving by remember { mutableStateOf(false) }
-    var settingsMessage by remember { mutableStateOf("") }
-    val scope = rememberCoroutineScope()
-    val tabs = listOf(
-        Triple("General","bell",""), Triple("Pròxim","clock",""), Triple("Nous","info",""),
-        Triple("Entrades","ticket",""), Triple("Suggerències","star",""), Triple("Comunitat","people","")
-    )
-    val currentEntries = entries.filter { it.key !in dismissedIds }
-    fun isUnread(entry: IosNotificationEntry) = entry.key !in readLocalIds &&
-        (entry.remoteId == null || notifications.firstOrNull { it.id == entry.remoteId }?.read == false)
-    val unread = currentEntries.count(::isUnread)
-    LaunchedEffect(page, accountId) {
-        if (page == "Configuració" && accountId != null && !emailLoaded) {
-            runCatching { api.emailPreferences() }
-                .onSuccess { emailDraft = it; emailLoaded = true }
-                .onFailure { settingsMessage = "No s'han pogut consultar els correus: ${it.message.orEmpty()}" }
-        }
-    }
-    Dialog(onDismissRequest = {
-        if (page == "Notificacions") onDismiss() else page = "Notificacions"
-    }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(color = Color.White, shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
-            modifier = Modifier.fillMaxSize().padding(top = 5.dp)) {
-            Column(Modifier.fillMaxSize()) {
-                Row(Modifier.fillMaxWidth().padding(start=18.dp,end=8.dp,top=12.dp,bottom=6.dp),
-                    verticalAlignment=Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(page, fontSize=23.sp,fontWeight=FontWeight.ExtraBold)
-                        if(page == "Notificacions" && unread > 0) Text("$unread sense llegir",
-                            color=Color.Gray, fontSize=11.sp)
+    var view by remember { mutableStateOf(IosNotificationGrouping.GENERAL) }
+    var draft by remember(settings) { mutableStateOf(settings) }
+    val tabs = listOf("General" to "bell", "Pròxim" to "clock", "Nous" to "info",
+        "Entrades" to "ticket", "Suggerències" to "search", "Comunitat" to "people")
+    val grouped = remember(notifications) { notifications.groupBy {
+        IosNotificationGrouping.fromDeepLinkType(it.linkType) } }
+    val shown = if (view == IosNotificationGrouping.GENERAL) notifications else grouped[view].orEmpty()
+    val pending = notifications.count { !it.read }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+            Surface(color = Color.White, shape = RoundedCornerShape(topStart=21.dp,topEnd=21.dp),
+                modifier = Modifier.fillMaxWidth().fillMaxHeight(0.94f)) {
+                Column {
+                    Row(Modifier.fillMaxWidth().padding(start=18.dp,end=14.dp,top=15.dp,bottom=5.dp),
+                        verticalAlignment=Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Notificacions", fontSize=23.sp,fontWeight=FontWeight.Bold)
+                            Text("$pending sense llegir", fontSize=12.sp, color=Color.Gray)
+                        }
+                        AgendaTopAction("clock", onClick={ view="Recordatoris" },
+                            badge=reminders.size+artistBells.size)
+                        AgendaTopAction("sliders", onClick={ view="Configuració" })
+                        AgendaTopAction("close", onClick=onDismiss)
                     }
-                    if(page == "Notificacions") {
-                        AgendaTopAction("clock",onClick={page="Recordatoris actius"},badge=reminders.size+artistBells.size)
-                        AgendaTopAction("sliders",onClick={page="Configuració";settingsMessage=""})
-                    }
-                    AgendaTopAction("close",onClick={ if(page == "Notificacions") onDismiss() else page="Notificacions" })
-                }
-                when(page) {
-                    "Recordatoris actius" -> {
-                        LazyColumn(Modifier.weight(1f).fillMaxWidth(),
-                            contentPadding=PaddingValues(horizontal=16.dp,vertical=10.dp),
-                            verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                            item { Text("Des d'ací pots consultar, obrir o desactivar els avisos que tens configurats.",
-                                fontSize=13.sp,color=Color.Gray) }
-                            if(reminders.isNotEmpty()) item {
-                                Text("Esdeveniments",fontWeight=FontWeight.Bold,fontSize=17.sp)
-                            }
-                            items(reminders,key={"rem_${it.id}"}) { event ->
-                                Row(Modifier.fillMaxWidth().border(1.dp,Color(0xFFEAEAEA),RoundedCornerShape(13.dp))
-                                    .padding(10.dp),verticalAlignment=Alignment.CenterVertically) {
-                                    Poster(event.posterUrl,Modifier.size(width=62.dp,height=76.dp).clip(RoundedCornerShape(9.dp)))
-                                    Column(Modifier.weight(1f).clickable{onReminderClick(event)}.padding(horizontal=10.dp)) {
-                                        Text(event.title,fontWeight=FontWeight.Bold,fontSize=14.sp,maxLines=2)
-                                        Text("${event.date} · ${event.town}",fontSize=11.sp,color=Color.Gray)
-                                        val scheduled=reminderTime(event)
-                                        Text(if(scheduled.isNotBlank()) scheduled.replace('T',' ') else "Campaneta de l’app · Sense hora personalitzada",
-                                            fontSize=11.sp,color=Color.Gray)
+                    Row(Modifier.fillMaxWidth().padding(horizontal=5.dp,vertical=9.dp)) {
+                        tabs.forEach { (label,symbol) ->
+                            val active = view==label
+                            val unread = grouped[label].orEmpty().count{!it.read}
+                            Column(Modifier.weight(1f).clickable { view=label }
+                                .padding(vertical=7.dp),horizontalAlignment=Alignment.CenterHorizontally) {
+                                Box(contentAlignment=Alignment.TopEnd) {
+                                    AgendaGlyph(symbol,Modifier.size(22.dp),if(active) AgendaBlack else Color(0xFF555555))
+                                    if(unread>0) Box(Modifier.offset(x=8.dp,y=(-5).dp).size(15.dp)
+                                        .background(AgendaBlack,CircleShape), contentAlignment=Alignment.Center) {
+                                        Text(unread.coerceAtMost(9).toString(),color=Color.White,fontSize=8.sp)
                                     }
-                                    AgendaTopAction("bell",onClick={onReminderDisable(event)})
+                                }
+                                Spacer(Modifier.height(10.dp))
+                                Box(Modifier.fillMaxWidth().height(2.dp)
+                                    .background(if(active) AgendaBlack else Color.Transparent))
+                            }
+                        }
+                    }
+                    Text(view, modifier=Modifier.fillMaxWidth().padding(vertical=7.dp),
+                        textAlign=androidx.compose.ui.text.style.TextAlign.Center,
+                        fontSize=12.sp, fontWeight=FontWeight.SemiBold)
+                    LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(horizontal=10.dp,vertical=6.dp),
+                        verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                        if (view == "Configuració") {
+                            item { Text("Campaneta de l'app", fontWeight=FontWeight.Bold, fontSize=17.sp) }
+                            item { IosSettingSwitch("Novetats d'artistes amb campaneta", draft.followed) { draft=draft.copy(followed=it) } }
+                            item { IosSettingSwitch("Esdeveniments guardats pròxims", draft.dayBefore) { draft=draft.copy(dayBefore=it) } }
+                            item { IosSettingSwitch("Compres d'entrades", draft.tickets) { draft=draft.copy(tickets=it) } }
+                            item { IosSettingSwitch("Comunitat", draft.community) { draft=draft.copy(community=it) } }
+                            item { IosSettingSwitch("Suggerències culturals", draft.suggestions) { draft=draft.copy(suggestions=it) } }
+                            item { IosSettingSwitch("Canvis d'activitats", draft.changes) { draft=draft.copy(changes=it) } }
+                            item { IosSettingSwitch("Població preferida", draft.homeTown) { draft=draft.copy(homeTown=it) } }
+                            item { IosSettingSwitch("Comarca preferida", draft.homeComarca) { draft=draft.copy(homeComarca=it) } }
+                            item { IosSettingSwitch("Estils preferits", draft.favoriteStyle) { draft=draft.copy(favoriteStyle=it) } }
+                            item { HorizontalDivider() }
+                            item { Text("Correus electrònics", fontWeight=FontWeight.Bold, fontSize=17.sp) }
+                            if (isRegistered) {
+                                item { Row(horizontalArrangement=Arrangement.spacedBy(5.dp)) {
+                                    listOf("NONE","DAILY","WEEKLY").forEach { freq ->
+                                        FilterChip(selected=draft.emailFrequency==freq,
+                                            onClick={draft=draft.copy(emailFrequency=freq)},
+                                            label={Text(when(freq){"NONE"->"Cap";"DAILY"->"Diari";else->"Setmanal"})})
+                                    }
+                                } }
+                                item { IosSettingSwitch("Recomanacions",draft.emailRecommendations){draft=draft.copy(emailRecommendations=it)} }
+                                item { IosSettingSwitch("Artistes seguits",draft.emailArtists){draft=draft.copy(emailArtists=it)} }
+                                item { IosSettingSwitch("Recordatoris",draft.emailReminders){draft=draft.copy(emailReminders=it)} }
+                                item { IosSettingSwitch("Publicitat personalitzada",draft.emailAds){draft=draft.copy(emailAds=it)} }
+                            } else item { Text("Per rebre correus has d'iniciar sessió.",fontSize=12.sp) }
+                            item { HorizontalDivider() }
+                            item { Text("Notificacions iPhone",fontWeight=FontWeight.Bold,fontSize=17.sp) }
+                            item { IosSettingSwitch("Rebre notificacions push en este iPhone",draft.pushEnabled){draft=draft.copy(pushEnabled=it)} }
+                            item { IosSettingSwitch("Respectar les hores de descans",draft.quietEnabled){draft=draft.copy(quietEnabled=it)} }
+                            if (draft.quietEnabled) item {
+                                Column {
+                                    Text("Descans: ${IosNotificationCenterSettings.displayQuietTime(draft.quietStart)} – ${IosNotificationCenterSettings.displayQuietTime(draft.quietEnd)}",fontSize=12.sp)
+                                    Row(horizontalArrangement=Arrangement.spacedBy(5.dp)) {
+                                        listOf(22*60,23*60,0).forEach { start ->
+                                            FilterChip(selected=draft.quietStart==start,
+                                                onClick={draft=draft.copy(quietStart=start)},label={Text(IosNotificationCenterSettings.displayQuietTime(start))})
+                                        }
+                                    }
+                                    Row(horizontalArrangement=Arrangement.spacedBy(5.dp)) {
+                                        listOf(7*60,8*60,9*60).forEach { end ->
+                                            FilterChip(selected=draft.quietEnd==end,
+                                                onClick={draft=draft.copy(quietEnd=end)},label={Text(IosNotificationCenterSettings.displayQuietTime(end))})
+                                        }
+                                    }
                                 }
                             }
-                            if(artistBells.isNotEmpty()) item {
-                                Text("Artistes i grups",fontWeight=FontWeight.Bold,fontSize=17.sp,
-                                    modifier=Modifier.padding(top=12.dp))
-                            }
-                            items(artistBells,key={"artist_"+IosArtistBellPolicy.key(it.artistName)}) { bell ->
-                                Row(Modifier.fillMaxWidth().border(1.dp,Color(0xFFEAEAEA),RoundedCornerShape(13.dp))
-                                    .padding(12.dp),verticalAlignment=Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f).clickable{onOpenArtist(bell.artistName)}) {
-                                        Text(bell.artistName,fontWeight=FontWeight.Bold,fontSize=14.sp)
-                                        Text("Campaneta activa · ${IosArtistBellPolicy.label(bell.frequency)}",color=Color.Gray,fontSize=11.sp)
+                            item { TextButton(onClick=onOpenNativeSettings) { Text("Permisos de notificacions de l'iPhone") } }
+                            item { Button(onClick={onSaveSettings(draft)},enabled=!savingSettings,
+                                modifier=Modifier.fillMaxWidth()) {
+                                Text(if(savingSettings) "Guardant…" else "Guardar configuració")
+                            } }
+                            item { Text("Les preferències es guarden al servidor; els permisos i els enviaments push depenen d'APNs.",fontSize=11.sp,color=Color.Gray) }
+                        } else if (view == "Recordatoris") {
+                            items(reminders,key={"rem_${it.id}"}) { ev ->
+                                Row(Modifier.fillMaxWidth().background(AgendaChrome,RoundedCornerShape(13.dp))
+                                    .padding(10.dp),verticalAlignment=Alignment.CenterVertically) {
+                                    Poster(ev.posterUrl,Modifier.size(width=65.dp,height=78.dp)
+                                        .clip(RoundedCornerShape(9.dp)))
+                                    Column(Modifier.weight(1f).clickable{onReminderClick(ev)}
+                                        .padding(start=10.dp)) {
+                                        Text(ev.title,fontWeight=FontWeight.Bold,fontSize=14.sp,maxLines=2)
+                                        Text("${ev.town} · ${ev.venue}",fontSize=11.sp,maxLines=1,color=Color.Gray)
+                                        Text(reminderTime(ev).replace('T',' '),fontSize=11.sp)
                                     }
-                                    TextButton(onClick={onArtistBell(bell.artistName)}) { Text("Editar",fontSize=11.sp) }
-                                    TextButton(onClick={onArtistDisable(bell.artistName)}) { Text("Desactivar",fontSize=11.sp) }
+                                    AgendaTopAction("bell",onClick={onReminderDisable(ev)})
+                                }
+                            }
+                            items(artistBells,key={"bell_"+IosArtistBellPolicy.key(it.artistName)}) { item ->
+                                Row(Modifier.fillMaxWidth().background(AgendaChrome,RoundedCornerShape(13.dp))
+                                    .clickable{onArtistBell(item.artistName)}.padding(15.dp),
+                                    verticalAlignment=Alignment.CenterVertically) {
+                                    Text(item.artistName,Modifier.weight(1f),fontWeight=FontWeight.Bold)
+                                    Text(IosArtistBellPolicy.label(item.frequency),fontSize=12.sp)
+                                    AgendaGlyph("bell",Modifier.size(20.dp))
                                 }
                             }
                             if(reminders.isEmpty() && artistBells.isEmpty()) item {
                                 EmptyState("No tens recordatoris actius.")
                             }
-                        }
-                    }
-                    "Configuració" -> {
-                        LazyColumn(Modifier.weight(1f).fillMaxWidth(),
-                            contentPadding=PaddingValues(horizontal=18.dp,vertical=14.dp),
-                            verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                            item {
-                                Text("Campaneta de l’app",fontSize=18.sp,fontWeight=FontWeight.ExtraBold)
-                                IosNotificationToggle("Novetats dels artistes amb campaneta activada",draft.followedArtist) {
-                                    draft=draft.copy(followedArtist=it)
-                                }
-                                if(draft.followedArtist) Text("La freqüència es configura en cada artista o grup.",fontSize=12.sp,color=Color.Gray)
-                                IosNotificationToggle("Esdeveniments guardats pròxims",draft.upcoming) {
-                                    draft=draft.copy(upcoming=it)
-                                }
-                                IosNotificationToggle("Compres d’entrades",draft.tickets) {draft=draft.copy(tickets=it)}
-                                IosNotificationToggle("Comunitat: missatges i propostes",draft.community) {draft=draft.copy(community=it)}
-                                IosNotificationToggle("Suggerències culturals",draft.suggestions) {draft=draft.copy(suggestions=it)}
-                                Spacer(Modifier.height(18.dp))
-                                Text("Correus electrònics",fontSize=19.sp,fontWeight=FontWeight.ExtraBold)
-                                if(accountId == null) Text("Inicia sessió per configurar els correus.",fontSize=12.sp,color=Color.Gray)
-                                else {
-                                    Text("Periodicitat",fontSize=13.sp,fontWeight=FontWeight.Bold,
-                                        modifier=Modifier.padding(top=10.dp))
-                                    Row(horizontalArrangement=Arrangement.spacedBy(7.dp)) {
-                                        listOf("NONE" to "Desactivat","DAILY" to "Diari","WEEKLY" to "Setmanal").forEach { (wire,label) ->
-                                            FilterChip(selected=emailDraft.frequency==wire,onClick={emailDraft=emailDraft.copy(frequency=wire)},
-                                                label={Text(label,fontSize=12.sp)})
+                        } else {
+                            if (view == IosNotificationGrouping.UPCOMING) {
+                                items(reminders, key={ "upcoming_${it.id}" }) { ev ->
+                                    Row(Modifier.fillMaxWidth().background(AgendaChrome,RoundedCornerShape(13.dp))
+                                        .padding(10.dp), verticalAlignment=Alignment.CenterVertically) {
+                                        Poster(ev.posterUrl,Modifier.width(58.dp).height(70.dp)
+                                            .clip(RoundedCornerShape(8.dp)))
+                                        Column(Modifier.weight(1f).clickable { onReminderClick(ev) }.padding(start=10.dp)) {
+                                            Text(ev.title, fontWeight=FontWeight.Bold,fontSize=13.sp,maxLines=2)
+                                            Text(reminderTime(ev).replace('T',' '),fontSize=11.sp)
+                                            Text("Recordatori actiu",color=Color.Gray,fontSize=10.sp)
                                         }
+                                        AgendaTopAction("bell",onClick={onReminderDisable(ev)})
                                     }
-                                    Text("Què vols rebre",fontWeight=FontWeight.SemiBold,modifier=Modifier.padding(top=8.dp))
-                                    IosNotificationToggle("Suggeriments segons els teus gustos",emailDraft.recommendations) {
-                                        emailDraft=emailDraft.copy(recommendations=it)
-                                    }
-                                    IosNotificationToggle("Esdeveniments dels artistes que seguixes",emailDraft.followedArtists) {
-                                        emailDraft=emailDraft.copy(followedArtists=it)
-                                    }
-                                    IosNotificationToggle("Guardats i recordatoris",emailDraft.savedReminders) {
-                                        emailDraft=emailDraft.copy(savedReminders=it)
-                                    }
-                                    IosNotificationToggle("Publicitat personalitzada",emailDraft.personalizedAds) {
-                                        emailDraft=emailDraft.copy(personalizedAds=it)
-                                    }
-                                }
-                                Spacer(Modifier.height(18.dp))
-                                Text("Notificacions iOS",fontSize=19.sp,fontWeight=FontWeight.ExtraBold)
-                                Text("Els recordatoris locals i els avisos push necessiten autorització d’iOS. " +
-                                    "Les campanetes d’artistes només enviaran push quan el servidor APNs estiga connectat.",
-                                    fontSize=12.sp,color=Color.Gray)
-                                OutlinedButton(onClick={IosNativeBridge.current?.showNotificationSettings()}) {
-                                    Text("Obrir els ajustos de notificacions d’iOS")
-                                }
-                                Text("Les hores de descans personalitzades d’Android encara no estan integrades en el planificador iOS.",
-                                    color=Color.Gray,fontSize=12.sp)
-                                if(settingsMessage.isNotBlank()) Text(settingsMessage,fontSize=12.sp,color=Color(0xFF9D2525),
-                                    modifier=Modifier.padding(top=8.dp))
-                                Button(onClick={
-                                    onPreferencesChange(draft)
-                                    if(accountId != null && emailLoaded) {
-                                        saving=true; settingsMessage=""
-                                        scope.launch {
-                                            runCatching { api.updateEmailPreferences(emailDraft) }
-                                                .onSuccess { emailDraft=it; settingsMessage="Configuració guardada.";page="Notificacions" }
-                                                .onFailure { settingsMessage="Preferències de l’app guardades, però no s’han pogut guardar els correus: ${it.message.orEmpty()}" }
-                                            saving=false
-                                        }
-                                    } else if (accountId != null) {
-                                        settingsMessage="Preferències de l’app guardades. No s’ha pogut carregar la configuració de correu."
-                                    } else {
-                                        settingsMessage="Preferències locals guardades.";page="Notificacions"
-                                    }
-                                },enabled=!saving,modifier=Modifier.fillMaxWidth().padding(top=18.dp)) {
-                                    Text(if(saving) "Guardant…" else "Guardar configuració")
                                 }
                             }
-                        }
-                    }
-                    else -> {
-                        Row(Modifier.fillMaxWidth().padding(horizontal=5.dp)) {
-                            tabs.forEach { (label,iconName,_) ->
-                                val active = selectedTab==label
-                                val count = if(label=="Suggerències")
-                                    currentEntries.count { it.section==label && isUnread(it) } +
-                                        suggestions.count { "suggest_${it.id}" !in readLocalIds }
-                                    else currentEntries.count { it.section==label && isUnread(it) }
-                                Column(Modifier.weight(1f).clickable{selectedTab=label}.padding(vertical=9.dp),
-                                    horizontalAlignment=Alignment.CenterHorizontally) {
-                                    Box(contentAlignment=Alignment.TopEnd) {
-                                        AgendaGlyph(iconName,Modifier.size(22.dp),if(active) AgendaBlack else Color(0xFF555555))
-                                        if(count>0) Box(Modifier.offset(x=8.dp,y=(-5).dp).size(15.dp)
-                                            .background(AgendaBlack,CircleShape),contentAlignment=Alignment.Center) {
-                                            Text(count.coerceAtMost(9).toString(),fontSize=8.sp,color=Color.White)
-                                        }
-                                    }
-                                    Spacer(Modifier.height(9.dp))
-                                    Box(Modifier.fillMaxWidth().height(2.dp)
-                                        .background(if(active) AgendaBlack else Color.Transparent))
-                                }
-                            }
-                        }
-                        Text(selectedTab,modifier=Modifier.fillMaxWidth().padding(top=5.dp,bottom=4.dp),
-                            textAlign=androidx.compose.ui.text.style.TextAlign.Center,
-                            fontSize=12.sp,fontWeight=FontWeight.SemiBold)
-                        HorizontalDivider(color=Color(0xFFEAEAEA))
-                        val visible = if(selectedTab=="General") currentEntries.filter { isUnread(it) }
-                            else currentEntries.filter { it.section==selectedTab }
-                        LazyColumn(Modifier.weight(1f).fillMaxWidth(),
-                            contentPadding=PaddingValues(horizontal=14.dp,vertical=10.dp),
-                            verticalArrangement=Arrangement.spacedBy(9.dp)) {
-                            items(visible,key={it.key}) { notice ->
-                                val original=notice.remoteId?.let { id->notifications.firstOrNull { it.id==id } }
-                                val event=notice.eventId?.let(eventsById::get)
+                            items(shown,key={it.id}) { notice ->
+                                val ev = eventsById[notice.linkValue.toIntOrNull()]
+                                    ?: eventsById.values.firstOrNull { it.title.equals(notice.title,ignoreCase=true) }
                                 Row(Modifier.fillMaxWidth()
-                                    .background(if(isUnread(notice)) Color(0xFFF1F1F1) else Color(0xFFF9F9F9),RoundedCornerShape(13.dp))
-                                    .clickable {
-                                        onReadLocal(notice.key)
-                                        if(original!=null) onRead(original)
-                                        else if(event!=null) onReminderClick(event)
-                                        else if(notice.artistName.isNotBlank()) onArtistBell(notice.artistName)
-                                    }.padding(10.dp),verticalAlignment=Alignment.CenterVertically) {
-                                    if(event!=null) Poster(event.posterUrl,Modifier.width(65.dp).height(79.dp)
-                                        .clip(RoundedCornerShape(9.dp)))
+                                    .background(if(notice.read) Color(0xFFF6F6F6) else AgendaChrome,
+                                        RoundedCornerShape(13.dp))
+                                    .clickable{onRead(notice)}.padding(10.dp),
+                                    verticalAlignment=Alignment.CenterVertically) {
+                                    if(ev != null) Poster(ev.posterUrl,
+                                        Modifier.width(65.dp).height(79.dp).clip(RoundedCornerShape(9.dp)))
                                     else Box(Modifier.size(65.dp).background(Color.White,RoundedCornerShape(9.dp)),
-                                        contentAlignment=Alignment.Center) { AgendaGlyph("bell",Modifier.size(24.dp)) }
+                                        contentAlignment=Alignment.Center) {
+                                        AgendaGlyph("bell",Modifier.size(24.dp))
+                                    }
                                     Spacer(Modifier.width(11.dp))
                                     Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                                        Text(notice.title,fontSize=14.sp,fontWeight=FontWeight.SemiBold,maxLines=2,overflow=TextOverflow.Ellipsis)
-                                        Text(notice.body,fontSize=12.sp,maxLines=2,overflow=TextOverflow.Ellipsis,color=Color.DarkGray)
+                                        Text(notice.title,maxLines=2,overflow=TextOverflow.Ellipsis,
+                                            fontSize=14.sp,fontWeight=FontWeight.SemiBold)
+                                        Text(if(ev==null) notice.body else listOf(ev.town,ev.venue)
+                                            .filter(String::isNotBlank).joinToString(" · "),
+                                            maxLines=2,overflow=TextOverflow.Ellipsis,
+                                            fontSize=12.sp,color=Color.DarkGray)
+                                        Text(if(ev != null) listOf(ev.date,ev.time,
+                                            IosUnfilteredFeedPolicy.ticketLabel(ev.ticketAvailable,ev.price))
+                                            .filter(String::isNotBlank).joinToString(" · ") else notice.createdAt,
+                                            fontSize=11.sp,color=AgendaBlack)
                                     }
-                                    if(isUnread(notice)) Box(Modifier.size(7.dp).background(AgendaBlack,CircleShape))
+                                    if(!notice.read) Box(Modifier.align(Alignment.Top).size(7.dp)
+                                        .background(AgendaBlack,CircleShape))
                                 }
                             }
-                            if(selectedTab=="Entrades") {
-                                val known = visible.mapNotNull { it.eventId }.toSet()
-                                items(tickets.filter { it.eventId.toIntOrNull() !in known }.distinctBy{it.eventId},
-                                    key={"ticket_"+it.id}) { ticket ->
-                                    Row(Modifier.fillMaxWidth().border(1.dp,Color(0xFFE8E8E8),RoundedCornerShape(12.dp))
-                                        .clickable{onOpenTickets()}.padding(14.dp),verticalAlignment=Alignment.CenterVertically) {
-                                        AgendaGlyph("ticket",Modifier.size(24.dp))
-                                        Spacer(Modifier.width(12.dp))
-                                        Column(Modifier.weight(1f)) {
-                                            Text(ticket.eventTitle,fontWeight=FontWeight.SemiBold)
-                                            Text("Entrada comprada · Veure les meues entrades",fontSize=11.sp,color=Color.Gray)
-                                        }
-                                    }
-                                }
-                            }
-                            if(selectedTab=="Suggerències" || selectedTab=="General") {
-                                val existing=visible.mapNotNull { it.eventId }.toSet()
-                                val eligible = suggestions.filterNot { it.id in existing }.filter { event ->
-                                    selectedTab!="General" || "suggest_${event.id}" !in readLocalIds
-                                }
-                                items(eligible,key={"suggest_${it.id}"}) { event ->
-                                    Row(Modifier.fillMaxWidth().border(1.dp,Color(0xFFE8E8E8),RoundedCornerShape(12.dp))
-                                        .clickable{onReadLocal("suggest_${event.id}");onOpenSuggestion(event)}
-                                        .padding(10.dp),verticalAlignment=Alignment.CenterVertically) {
-                                        Poster(event.posterUrl,Modifier.width(65.dp).height(79.dp).clip(RoundedCornerShape(8.dp)))
-                                        Column(Modifier.weight(1f).padding(start=12.dp)) {
-                                            Text(event.title,maxLines=2,fontSize=14.sp,fontWeight=FontWeight.Bold)
-                                            Text("${event.date} · ${event.town}",fontSize=11.sp,color=Color.Gray)
-                                        }
-                                    }
-                                }
-                            }
-                            if(visible.isEmpty() && (selectedTab!="Entrades" || tickets.isEmpty()) &&
-                                (selectedTab!="Suggerències" || suggestions.isEmpty()) &&
-                                (selectedTab!="General" || suggestions.none { "suggest_${it.id}" !in readLocalIds })) item {
-                                Box(Modifier.fillMaxWidth().padding(top=35.dp),contentAlignment=Alignment.Center) {
-                                    Text(when(selectedTab) {
-                                        "General" -> "No tens notificacions noves."
-                                        "Pròxim" -> "No tens esdeveniments guardats pròxims."
-                                        "Nous" -> "No hi ha novetats d’artistes amb campaneta activa."
-                                        "Entrades" -> "No tens entrades noves esta setmana."
-                                        "Comunitat" -> "No hi ha novetats de Comunitat."
-                                        else -> "No hi ha cap suggerència destacada ara."
-                                    },fontSize=13.sp,color=Color.Gray)
-                                }
-                            }
+                            if(shown.isEmpty() && (view != IosNotificationGrouping.UPCOMING || reminders.isEmpty()))
+                                item { EmptyState("No hi ha avisos en esta categoria.") }
                         }
-                        Row(Modifier.fillMaxWidth().padding(horizontal=14.dp,vertical=8.dp),
-                            horizontalArrangement=Arrangement.End) {
-                            OutlinedButton(onClick={onDismissAll(currentEntries.map {it.key} +
-                                suggestions.map { "suggest_${it.id}" })},
-                                enabled=currentEntries.isNotEmpty() || suggestions.any { "suggest_${it.id}" !in readLocalIds }) {
-                                Text("Netejar notificacions",fontSize=12.sp,fontWeight=FontWeight.Bold,
-                                    color=Color(0xFF9D2525))
+                    }
+                    if(view != "Configuració") {
+                        Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement=Arrangement.End) {
+                            OutlinedButton(onClick=onClearRead,enabled=pending>0) {
+                                Text("Netejar",fontSize=12.sp)
                             }
                         }
                     }
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun IosNotificationToggle(title: String, enabled: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(vertical=3.dp),verticalAlignment=Alignment.CenterVertically) {
-        Text(title,Modifier.weight(1f),fontSize=13.sp)
-        Switch(checked=enabled,onCheckedChange=onChange)
     }
 }
 
@@ -3824,8 +4202,8 @@ private fun ChatDialog(group: IosCommunityGroup, api: IosAgendaApi, isCreator: B
                     work { requests = api.pendingRequests(group.id); reviewingRequests = true }
                 }) { Text("Sol·licituds d'accés") }
                 if (membership != "ACCEPTED") Button(onClick = { work {
-                    runCatching { api.joinGroup(group.id) }.onSuccess {
-                        membership = if (group.access == "OPEN") "ACCEPTED" else "PENDING"
+                    runCatching { api.joinGroup(group.id, group.eventId, group.access) }.onSuccess {
+                        membership = it
                         if (membership == "ACCEPTED") messages = api.messages(group.id)
                     }.onFailure { error = it.message.orEmpty() }
                 } }) { Text(if (membership == "PENDING") "Petició pendent" else "Sol·licitar accés") }
@@ -3883,58 +4261,253 @@ private fun ChatDialog(group: IosCommunityGroup, api: IosAgendaApi, isCreator: B
 
 @Composable
 private fun TicketOptionsDialog(event: AgendaEventSummary, api: IosAgendaApi,
-                                authenticated: Boolean, onLoginRequired: () -> Unit, onDismiss: () -> Unit,
-                                onPurchased: () -> Unit, onError: (String) -> Unit) {
+                                pendingStart: IosTicketPaymentStart?,
+                                onPaymentCreated: (IosTicketPaymentStart) -> Unit,
+                                onPaymentCleared: (IosTicketPaymentStart) -> Unit,
+                                onDismiss: () -> Unit,
+                                onPurchased: (Boolean) -> Unit, onError: (String) -> Unit) {
     val scope = rememberCoroutineScope()
-    var options by remember(event.id) { mutableStateOf(emptyList<IosTicketOption>()) }
+    var catalog by remember(event.id) { mutableStateOf(IosTicketCatalog(emptyList(), null)) }
     var loaded by remember(event.id) { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
-    var quantity by remember { mutableIntStateOf(1) }
-    var selectedOption by remember { mutableStateOf<IosTicketOption?>(null) }
-    var serverError by remember { mutableStateOf("") }
-    LaunchedEffect(event.id) {
-        try { options = api.ticketOptions(event.id) }
-        catch (ex: Exception) { serverError = ex.message.orEmpty() }
-        finally { loaded = true }
+    var reload by remember(event.id) { mutableIntStateOf(0) }
+    var busy by remember(event.id) { mutableStateOf(false) }
+    var quantity by remember(event.id) { mutableIntStateOf(1) }
+    var selectedId by remember(event.id) { mutableIntStateOf(0) }
+    var selectedDay by remember(event.id) { mutableStateOf("") }
+    var selectedZone by remember(event.id) { mutableStateOf("") }
+    var serverError by remember(event.id) { mutableStateOf("") }
+    val paymentStart = pendingStart
+    var nativePaymentOpen by remember(event.id) { mutableStateOf(false) }
+    var paymentMessage by remember(event.id) { mutableStateOf("") }
+    var checkingPayment by remember(event.id) { mutableStateOf(false) }
+    suspend fun checkPaidOrder(start: IosTicketPaymentStart) {
+        // Server is authoritative. Stripe's COMPLETED only starts verification.
+        checkingPayment = true
+        try {
+            var lastStatus = "payment_pending"
+            var lastError = ""
+            repeat(10) { attempt ->
+                val answer = try { api.ticketPaymentStatus(start) }
+                    catch (ex: Exception) {
+                        lastError = ex.message ?: "No es pot consultar l'estat de la comanda"
+                        null
+                    }
+                if (answer != null) {
+                    lastStatus = answer.status
+                    if (IosPaidTicketPolicy.isPaid(answer.status)) {
+                        // Receipt endpoint is best-effort and cannot override paid state.
+                        runCatching { api.requestTicketReceipt(start) }
+                        onPaymentCleared(start)
+                        onPurchased(true)
+                        return
+                    }
+                    if (IosPaidTicketPolicy.isTerminalFailure(answer.status)) {
+                        paymentMessage = when (answer.status.lowercase()) {
+                            "payment_failed" -> "Pagament rebutjat pel servidor."
+                            "refunded" -> "La comanda consta com a reembossada."
+                            else -> "Pagament cancel·lat al servidor."
+                        }
+                        onPaymentCleared(start)
+                        return
+                    }
+                }
+                if (attempt < 9) kotlinx.coroutines.delay(700L)
+            }
+            paymentMessage = if (lastError.isNotBlank())
+                "$lastError. La comanda ${start.orderId} no està confirmada; comprova-la abans de tornar a pagar."
+            else "Comanda ${start.orderId}: $lastStatus. Encara sense confirmació; revisa l'estat més tard. No repetisques el pagament."
+        } finally { checkingPayment = false }
     }
-    AlertDialog(onDismissRequest = onDismiss,
+    fun openStripe(start: IosTicketPaymentStart) {
+        val native = IosNativeBridge.current
+        if (native == null) {
+            paymentMessage = "No està disponible el pagament natiu d'iPhone."
+            return
+        }
+        try {
+            nativePaymentOpen = true
+            native.presentTicketPayment(start.clientSecret,start.publishableKey,
+                start.merchantName, object : IosTicketPaymentCallback {
+                override fun onComplete(result: String, error: String) {
+                    scope.launch {
+                        nativePaymentOpen = false
+                        when (result.uppercase()) {
+                            "COMPLETED" -> {
+                                paymentMessage = "Pagament tramitat; esperant confirmació del servidor."
+                                checkPaidOrder(start)
+                            }
+                            "CANCELLED" -> {
+                                paymentMessage = "Has tancat Stripe. La comanda continua sense confirmar; pots reprendre este mateix pagament."
+                            }
+                            else -> {
+                                paymentMessage = error.ifBlank { "Stripe no ha pogut completar el pagament." } +
+                                    " Consulta la comanda abans de repetir-la."
+                            }
+                        }
+                    }
+                }
+            })
+        } catch (ex: Exception) {
+            nativePaymentOpen = false
+            paymentMessage = (ex.message ?: "No s'ha pogut obrir Stripe") +
+                ". La comanda continua pendent al servidor."
+        }
+    }
+    LaunchedEffect(event.id, reload) {
+        loaded = false
+        serverError = ""
+        try {
+            catalog = api.ticketCatalog(event.id)
+            val visible = IosTicketCatalogPolicy.visible(catalog.options, currentAgendaDateIso())
+            selectedId = visible.firstOrNull(IosTicketCatalogPolicy::selectable)?.id ?: 0
+            quantity = 1
+        } catch (ex: Exception) {
+            catalog = IosTicketCatalog(emptyList(), null)
+            serverError = ex.message ?: "No s'han pogut consultar les entrades"
+        } finally { loaded = true }
+    }
+    val visibleOptions = IosTicketCatalogPolicy.visible(catalog.options, currentAgendaDateIso())
+    val filtered = IosTicketCatalogPolicy.filter(visibleOptions, selectedDay, selectedZone)
+    val selectedOption = visibleOptions.firstOrNull { it.id == selectedId }
+    val limit = IosTicketCatalogPolicy.quantityLimit(selectedOption)
+    val validSelection = !busy && !nativePaymentOpen && !checkingPayment && paymentStart == null &&
+        loaded && serverError.isBlank() && IosTicketCatalogPolicy.selectable(selectedOption) &&
+        quantity in 1..limit && selectedOption in filtered
+    AlertDialog(onDismissRequest = {
+        if (!busy && !nativePaymentOpen && !checkingPayment) onDismiss()
+    },
         title = { Text("Entrades · ${event.title}") },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            if (!loaded) Text("Consultant opcions…")
-            if (serverError.isNotBlank()) Text(serverError, color = Color.Red, fontSize = 12.sp)
-            if (loaded && options.isEmpty() && serverError.isBlank()) Text("Entrada general · ${event.price} €")
-            options.forEach { option ->
-                Row(Modifier.fillMaxWidth().clickable { selectedOption = option }, verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(selected = selectedOption?.id == option.id, onClick = { selectedOption = option })
-                    Column { Text(option.name, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                        Text("${option.price} €${option.remaining?.let { " · $it disponibles" }.orEmpty()}", fontSize = 12.sp) }
+        text = { Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            if (!loaded) CircularProgressIndicator(Modifier.size(22.dp))
+            if (serverError.isNotBlank()) {
+                Text(serverError, color = Color(0xFFAD3030), fontSize = 12.sp)
+                TextButton(onClick = { reload++ }) { Text("Tornar a consultar") }
+            }
+            if (loaded && visibleOptions.isEmpty() && serverError.isBlank())
+                Text("No hi ha cap modalitat d'entrada disponible. No es pot reservar sense confirmació del servidor.")
+            catalog.capacity?.let { Text("Aforament total: $it", fontSize = 12.sp, color = Color.Gray) }
+            val days = IosTicketCatalogPolicy.days(visibleOptions)
+            if (days.isNotEmpty()) {
+                Text("Dates", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    FilterChip(selectedDay.isEmpty(), onClick = { selectedDay = "" }, label = { Text("Totes") })
+                    days.forEach { day -> FilterChip(selectedDay == day, onClick = { selectedDay = day },
+                        label = { Text(IosUnfilteredFeedPolicy.fullDate(day)) }) }
                 }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Quantitat: $quantity", modifier = Modifier.weight(1f))
-                TextButton(enabled = quantity > 1, onClick = { quantity-- }) { Text("−") }
-                TextButton(enabled = quantity < (selectedOption?.maxPerOrder ?: 6).coerceAtMost(6),
-                    onClick = { quantity++ }) { Text("+") }
+            val zones = IosTicketCatalogPolicy.sectors(visibleOptions)
+            if (zones.isNotEmpty()) {
+                Text("Zones", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    FilterChip(selectedZone.isEmpty(), onClick = { selectedZone = "" }, label = { Text("Totes") })
+                    zones.forEach { zone -> FilterChip(selectedZone == zone, onClick = { selectedZone = zone },
+                        label = { Text(zone) }) }
+                }
             }
-            val price = selectedOption?.price ?: event.price.toDoubleOrNull()
-            if (price != null && price > 0.0) Text("El cobrament amb Stripe/Redsys encara no està disponible en esta versió d'iPhone. No es crearà cap comanda de pagament.",
-                fontSize = 12.sp, color = Color.Gray)
+            if (filtered.isEmpty() && visibleOptions.isNotEmpty())
+                Text("No hi ha entrades per a esta combinació de data i zona.", fontSize = 12.sp)
+            filtered.forEach { option ->
+                val selectable = IosTicketCatalogPolicy.selectable(option)
+                Row(Modifier.fillMaxWidth().clickable(enabled = selectable && !busy && paymentStart == null) {
+                    selectedId = option.id; quantity = 1
+                }, verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = selectedId == option.id,
+                        enabled = selectable && !busy && paymentStart == null,
+                        onClick = { selectedId = option.id; quantity = 1 })
+                    Column(Modifier.weight(1f)) {
+                        Text(option.name, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                        Text(if (option.price == 0.0) "Gratuïta" else "${option.price} €", fontSize = 12.sp)
+                        val details = IosTicketCatalogPolicy.details(option)
+                        if (details.isNotBlank()) Text(details, fontSize = 11.sp)
+                        option.available?.let { Text(if (it == 0) "Esgotada" else "$it disponibles", fontSize = 11.sp) }
+                        Text("Màxim ${IosTicketCatalogPolicy.quantityLimit(option)} en esta compra", fontSize = 11.sp, color = Color.Gray)
+                        if (option.saleStartsAt.isNotBlank() || option.saleEndsAt.isNotBlank())
+                            Text("Venda: ${option.saleStartsAt.ifBlank { "sense inici" }} — ${option.saleEndsAt.ifBlank { "sense fi" }}",
+                                fontSize = 11.sp, color = Color.Gray)
+                    }
+                }
+            }
+            if (selectedOption != null && selectedOption in filtered) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Quantitat: $quantity", modifier = Modifier.weight(1f))
+                    TextButton(enabled = !busy && paymentStart == null && quantity > 1,
+                        onClick = { quantity-- }) { Text("−") }
+                    TextButton(enabled = !busy && paymentStart == null && quantity < limit,
+                        onClick = { quantity++ }) { Text("+") }
+                }
+                if (selectedOption.price > 0.0) {
+                    Text("Import base: ${selectedOption.price * quantity} € · $quantity entrada/es. " +
+                         "La passarel·la mostrarà l'import definitiu del servidor.",
+                         fontSize = 12.sp, color = Color.Gray)
+                } else Text("Reserva gratuïta · $quantity entrada/es. El servidor confirmarà l'estoc final.",
+                    fontSize = 12.sp, color = Color.Gray)
+            }
+            if (paymentMessage.isNotBlank()) Text(paymentMessage, color = Color(0xFFAD3030), fontSize = 12.sp)
+            if (checkingPayment) Text("Verificant el pagament amb el servidor…", fontSize = 12.sp)
+            paymentStart?.let { pending ->
+                Text("Comanda ${pending.orderId} en comprovació. No tornes a pagar sense revisar-ne l'estat.", fontSize = 12.sp)
+                OutlinedButton(enabled = !busy && !nativePaymentOpen && !checkingPayment,
+                    onClick = { scope.launch { checkPaidOrder(pending) } }) { Text("Consultar estat de la comanda") }
+                OutlinedButton(enabled = !busy && !nativePaymentOpen && !checkingPayment,
+                    onClick = {
+                        busy = true
+                        scope.launch {
+                            try {
+                                // Before reopening Stripe check if the same order was already paid.
+                                val status = api.ticketPaymentStatus(pending)
+                                if (IosPaidTicketPolicy.isPaid(status.status)) {
+                                    runCatching { api.requestTicketReceipt(pending) }
+                                    onPaymentCleared(pending)
+                                    onPurchased(true)
+                                } else if (IosPaidTicketPolicy.isTerminalFailure(status.status)) {
+                                    onPaymentCleared(pending)
+                                    paymentMessage = "La comanda ja no permet pagament. Pots seleccionar-ne una altra."
+                                } else openStripe(pending)
+                            } catch (ex: Exception) {
+                                paymentMessage = (ex.message ?: "No s'ha pogut consultar la comanda") +
+                                    ". No es pot reprendre fins que es consulte el servidor."
+                            } finally { busy = false }
+                        }
+                    }) { Text("Continuar amb la mateixa comanda") }
+            }
         } },
         confirmButton = {
-            val price = selectedOption?.price ?: event.price.toDoubleOrNull()
-            TextButton(enabled = loaded && !busy && serverError.isBlank() && (options.isEmpty() || selectedOption != null) && price == 0.0 &&
-                (selectedOption?.remaining == null || selectedOption!!.remaining!! >= quantity),
-                onClick = {
-                    if (!authenticated) { onLoginRequired(); return@TextButton }
-                    busy = true
+            TextButton(enabled = validSelection, onClick = {
+                val option = selectedOption ?: return@TextButton
+                busy = true
+                paymentMessage = ""
+                if (option.price == 0.0) {
                     scope.launch {
-                        try { api.reserveFreeTicket(event.id, selectedOption?.id ?: 0, quantity); onPurchased() }
-                        catch (ex: Exception) { onError(ex.message ?: "No s'ha pogut emetre l'entrada") }
+                        try { api.reserveFreeTicket(event.id, option.id, quantity); onPurchased(false) }
+                        catch (ex: Exception) { paymentMessage = ex.message ?: "No s'ha pogut emetre l'entrada" }
                         finally { busy = false }
                     }
-                }) { Text(if (!authenticated) "Iniciar sessió per reservar" else if (busy) "Emetent…" else "Reservar gratuïtament") }
+                } else if (IosNativeBridge.current == null) {
+                    paymentMessage = "No està disponible la passarel·la nativa d'iPhone."
+                    busy = false
+                } else {
+                    scope.launch {
+                        try {
+                            val start = api.createTicketPayment(event.id,option.id,quantity)
+                            onPaymentCreated(start)
+                            openStripe(start)
+                        } catch (ex: Exception) {
+                            paymentMessage = (ex.message ?: "No s'ha pogut iniciar el pagament") +
+                                ". Consulta les teues entrades si s'ha creat una comanda."
+                        } finally { busy = false }
+                    }
+                }
+            }) {
+                Text(when {
+                    busy -> "Processant…"
+                    selectedOption?.price == 0.0 -> "Reservar gratuïtament"
+                    else -> "Pagar amb Stripe"
+                })
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Tancar") } })
+        dismissButton = { TextButton(enabled = !busy && !nativePaymentOpen && !checkingPayment,
+            onClick = onDismiss) { Text("Tancar") } })
 }
 
 @Composable
@@ -3944,11 +4517,13 @@ private fun CreateGroupDialog(event: AgendaEventSummary, api: IosAgendaApi, onDi
     var title by remember { mutableStateOf("") }
     var kind by remember { mutableStateOf("OTHER") }
     var open by remember { mutableStateOf(true) }
+    var chatEnabled by remember { mutableStateOf(true) }
     var description by remember { mutableStateOf("") }
     var origin by remember { mutableStateOf("") }
     var meetingAt by remember { mutableStateOf("") }
     var capacity by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
+    var submitted by remember { mutableStateOf(false) }
     AlertDialog(onDismissRequest = onDismiss,
         title = { Text("Crear tauló") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
@@ -3969,10 +4544,14 @@ private fun CreateGroupDialog(event: AgendaEventSummary, api: IosAgendaApi, onDi
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(open, onCheckedChange = { open = it }); Text("Obert (sense aprovació)", fontSize = 12.sp)
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(chatEnabled, onCheckedChange = { chatEnabled = it }); Text("Xat públic activat", fontSize = 12.sp)
+            }
         } },
-        confirmButton = { TextButton(enabled = !busy && title.isNotBlank(), onClick = { busy = true; scope.launch {
-            try { api.createCommunityGroup(event.id, title, kind, open, description, origin, meetingAt, capacity.toIntOrNull() ?: 0); onCreated() }
-            catch (ex: Exception) { onError(ex.message ?: "Error creant el tauló") }
+        confirmButton = { TextButton(enabled = !busy && !submitted && IosCommunityBoardContract.validCreate(event.id, title.trim(), kind,
+                capacity.toIntOrNull() ?: 0, meetingAt.trim()), onClick = { busy = true; submitted = true; scope.launch {
+            try { api.createCommunityGroup(event.id, title, kind, open, description, origin, meetingAt, capacity.toIntOrNull() ?: 0, chatEnabled); onCreated() }
+            catch (ex: Exception) { onError((ex.message ?: "Error creant el tauló") + ". Consulta Comunitat abans de tornar a crear-lo.") }
             finally { busy = false }
         } }) { Text("Crear") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel·lar") } })
@@ -3998,7 +4577,7 @@ private fun ProfessionalValidationDialog(api: IosAgendaApi, onDismiss: () -> Uni
             Text("El lector d'iPhone necessita permís de càmera i connexió per verificar el codi.", fontSize = 11.sp, color = Color.Gray)
             if (result.isNotBlank()) Text(result, fontWeight = FontWeight.Bold)
         } },
-        confirmButton = { TextButton(enabled = eventId.toIntOrNull() != null && code.isNotBlank() && !working,
+        confirmButton = { TextButton(enabled = eventId.toIntOrNull()?.let { it > 0 } == true && code.isNotBlank() && !working,
             onClick = { working = true; scope.launch {
                 try { result = api.validateTicket(eventId.toInt(), code) }
                 catch (e: Exception) { result = e.message ?: "Error de validació" }
@@ -4196,17 +4775,42 @@ private fun ProfileSettingsEditor(current: IosProfileSettings, onDismiss: () -> 
 
 
 @Composable
+private fun AccountIdentityIosDialog(current: IosAccount, homeTown: String,
+    onDismiss: () -> Unit, onSave: (String, String, String) -> Unit) {
+    var username by remember(current.id) { mutableStateOf(current.username) }
+    var email by remember(current.id) { mutableStateOf(current.email) }
+    var town by remember(current.id, homeTown) { mutableStateOf(homeTown) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Dades del compte") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(username, { username = it.take(190) }, label = { Text("Usuari") }, singleLine = true)
+            OutlinedTextField(email, { email = it.take(254) }, label = { Text("Correu electrònic") }, singleLine = true)
+            OutlinedTextField(town, { town = it.take(190) }, label = { Text("Població") }, singleLine = true)
+            Text("El canvi de correu pot requerir una nova verificació.", fontSize = 12.sp)
+        } }, confirmButton = {
+            TextButton(enabled = runCatching { IosProfileParity.validateIdentity(username,email,town); true }.getOrDefault(false),
+                onClick = { onSave(username, email, town) }) { Text("Guardar") }
+        }, dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel·lar") } })
+}
+
+@Composable
 private fun ProfileEditIosDialog(current: IosMyProfile, onDismiss: () -> Unit,
-                                 onPickImage: () -> Unit, onSave: (String, String, Boolean) -> Unit) {
+                                 onPickImage: () -> Unit, onSave: (IosMyProfile, Boolean) -> Unit) {
     var name by remember(current.displayName) { mutableStateOf(current.displayName) }
     var bio by remember(current.bio) { mutableStateOf(current.bio) }
+    var discipline by remember(current.discipline) { mutableStateOf(current.discipline) }
+    var company by remember(current.companyName) { mutableStateOf(current.companyName) }
+    var cast by remember(current.castText) { mutableStateOf(current.castText) }
+    var publisher by remember(current.publisherName) { mutableStateOf(current.publisherName) }
+    var books by remember(current.booksText) { mutableStateOf(current.booksText) }
+    var works by remember(current.worksText) { mutableStateOf(current.worksText) }
+    var spaces by remember(current.spacesText) { mutableStateOf(current.spacesText) }
     var remove by remember { mutableStateOf(false) }
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Editar perfil") },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             if (current.photoUrl.isNotBlank() && !remove) {
                 AsyncImage(model = current.photoUrl, contentDescription = "Foto actual", modifier = Modifier.size(90.dp).clip(CircleShape), contentScale = ContentScale.Crop)
             }
-            OutlinedButton(onClick = onPickImage) { Text("Triar fotografia de Fotos") }
+            OutlinedButton(onClick = { remove = false; onPickImage() }) { Text("Triar fotografia de Fotos") }
             if (current.photoUrl.isNotBlank()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = remove, onCheckedChange = { remove = it })
@@ -4215,9 +4819,20 @@ private fun ProfileEditIosDialog(current: IosMyProfile, onDismiss: () -> Unit,
             }
             OutlinedTextField(name, { name = it.take(190) }, label = { Text("Nom i cognoms") }, singleLine = true)
             OutlinedTextField(bio, { bio = it.take(3000) }, label = { Text("Biografia") }, minLines = 2, maxLines = 4)
-            Text("La fotografia es guarda al servidor, igual que en Android.", fontSize = 11.sp, color = Color.Gray)
+            OutlinedTextField(discipline, { discipline = it.take(190) }, label = { Text("Disciplina") })
+            OutlinedTextField(company, { company = it.take(190) }, label = { Text("Companyia / empresa") })
+            OutlinedTextField(cast, { cast = it.take(3000) }, label = { Text("Repartiment") })
+            OutlinedTextField(publisher, { publisher = it.take(190) }, label = { Text("Editorial") })
+            OutlinedTextField(books, { books = it.take(3000) }, label = { Text("Llibres") })
+            OutlinedTextField(works, { works = it.take(3000) }, label = { Text("Obres") })
+            OutlinedTextField(spaces, { spaces = it.take(3000) }, label = { Text("Espais") })
+            Text("El perfil públic i la fotografia es guarden al servidor.", fontSize = 11.sp, color = Color.Gray)
         } },
-        confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = { onSave(name, bio, remove) }) { Text("Guardar") } },
+        confirmButton = { TextButton(enabled = name.isNotBlank(), onClick = {
+            onSave(current.copy(displayName = name, bio = bio, discipline = discipline,
+                companyName = company, castText = cast, publisherName = publisher,
+                booksText = books, worksText = works, spacesText = spaces), remove)
+        }) { Text("Guardar") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel·lar") } })
 }
 

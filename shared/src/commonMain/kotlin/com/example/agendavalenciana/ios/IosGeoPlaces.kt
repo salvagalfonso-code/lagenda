@@ -6032,7 +6032,11 @@ Zona Industrial|Zona Industrial||Marina Baixa|PV|38.519684|-0.208194|0
 Òdena|Òdena||Anoia|CAT|41.618601|1.631426|1
 Òpol i Perellós|Opoul-Périllos||el Rosselló|CN|42.880115|2.857973|1
 Òrrius|Òrrius||Maresme|CAT|41.555115|2.351046|1
-Úbeda|Úbeda||Vinalopó Mitjà|PV|38.447881|-0.984281|0"""
+Úbeda|Úbeda||Vinalopó Mitjà|PV|38.447881|-0.984281|0
+el Grau de Castelló|el Grau de Castelló||Plana Alta|PV|39.976136|0.0|0
+La Marmudella|La Marmudella||Plana Alta|PV|40.1077209|0.0|0
+Urbanització El Boqueró-Montpobla|Urbanització El Boqueró-Montpobla||Plana Alta|PV|40.1158242|0.0|0
+"""
     )
     private val resolved by lazy(LazyThreadSafetyMode.PUBLICATION) {
         val index = HashMap<String, IosGeoPlace>(8000)
@@ -6051,6 +6055,31 @@ Zona Industrial|Zona Industrial||Marina Baixa|PV|38.519684|-0.208194|0
         }
         index to byRegion
     }
+    /** Full, immutable catalogue, retaining homonymous towns, original official names and aliases.
+     * The original `resolved` alias map is a lookup, not a suggestion index: it
+     * collapses homonyms and can never provide Android's comarca subtitle.
+     */
+    data class TownEntry(val name: String, val official: String, val comarca: String,
+                         val territory: String, val aliases: List<String>)
+    private val namedTowns: List<TownEntry> by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        rows.asSequence().flatMap { it.lineSequence() }.mapNotNull { line ->
+            val columns = line.split('|')
+            if (columns.size != 8 || columns[7] != "1") null else
+                TownEntry(columns[0].trim(), columns[1].trim(), columns[3].trim(),
+                    columns[4].trim(), columns[2].split(';').map(String::trim).filter(String::isNotBlank))
+        }.filter { it.name.isNotBlank() }
+            .distinctBy { listOf(norm(it.name), norm(it.comarca), it.territory) }
+            .toList()
+    }
+    fun municipalityEntries(): List<TownEntry> = namedTowns
+    private val homonymousTownNames by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        namedTowns.groupBy { norm(it.name) }.filterValues { it.size > 1 }.keys
+    }
+    fun ambiguousTown(name: String): Boolean = norm(name) in homonymousTownNames
+    fun selectedTownComarca(name: String, comarca: String): Boolean =
+        namedTowns.any { norm(it.name) == norm(name) && norm(it.comarca) == norm(comarca) }
+    fun canonicalComarca(name: String): String? = allComarques().firstOrNull { norm(it) == norm(name) }
+
     fun allTowns(): List<String> = resolved.first.values.asSequence().filter { it.municipality }.map { it.name }.distinct().sorted().toList()
     fun allComarques(): List<String> = resolved.second.values.mapNotNull { it.firstOrNull()?.comarca }.distinct().sorted()
     fun searchTowns(query: String, limit: Int = 25): List<String> {

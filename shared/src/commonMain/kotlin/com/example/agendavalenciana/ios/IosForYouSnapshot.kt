@@ -5,6 +5,8 @@ import com.example.agendavalenciana.model.DiscoveryLevel
 /** 30 minute ordered feed snapshot, account and explicit-taste scoped. */
 object IosForYouSnapshot {
     private const val TTL = 30L * 60L * 1000L
+    // In-memory optimization only; never persist a personal feed in UserDefaults.
+    private val memory = mutableMapOf<String, String>()
     fun select(events: List<AgendaEventSummary>, userId: Int?, user: IosUserState,
         categories: Set<String>, towns: Set<String>, paid: IosPromoted,
         subcategories: Set<String> = emptySet(), comarques: Set<String> = emptySet(),
@@ -18,6 +20,9 @@ object IosForYouSnapshot {
             // A new event or changed date/title must not be silently lost.
             append(events.size); append(':'); events.forEach { append(it.key); append('_'); append(it.updatedAt); append('_'); append(it.category); append(';') }
             append('|'); user.follows.sortedWith(compareBy({ it.type }, { it.key })).forEach { append(it.type); append(it.key); append(';') }
+            append('|'); user.affinities.sortedWith(compareBy({ it.type }, { it.key })).forEach {
+                append(it.type); append(':'); append(it.key); append(':'); append(it.effectiveScore); append(';')
+            }
             append('|'); categories.sorted().forEach { append(it); append(';') }
             append('|'); subcategories.sorted().forEach { append(it); append(';') }
             append('|'); towns.sorted().forEach { append(it); append(';') }
@@ -41,11 +46,11 @@ object IosForYouSnapshot {
             append('|'); paid.ads.forEach { append(it.id); append(';') }
         }
         val prefix = "for_you_${userId ?: "guest"}_"
-        val storedSignature = platformReadPublicCache(prefix + "signature")
-        val storedAt = platformReadPublicCache(prefix + "at").toLongOrNull() ?: 0L
+        val storedSignature = memory[prefix + "signature"]
+        val storedAt = memory[prefix + "at"]?.toLongOrNull() ?: 0L
         val age = currentEpochMillis() - storedAt
         if (signature == storedSignature && age in 0 until TTL) {
-            val rawIds = platformReadPublicCache(prefix + "ordered_ids")
+            val rawIds = memory[prefix + "ordered_ids"].orEmpty()
             // Persist a deliberately empty selection too; don't rebuild it on every launch.
             if (rawIds == "~") return emptyList()
             val ids = rawIds.split(',').filter(String::isNotBlank)
@@ -60,14 +65,14 @@ object IosForYouSnapshot {
                 event.styles,event.town,event.language,event.ticketAvailable)
         }
         val selectedKeys = IosPersonalFeedPolicy.select(inputs,user.follows,settings,priorityIds,
-            if (suggestions) IosRecentInterest.current(userId) else emptySet(),
+            if (suggestions) IosAffinitySignals.styleWeights(user.affinities).keys else emptySet(),
             artistMetadata = entityStyles,
-            recentStyleWeights = if (suggestions) IosRecentInterest.weighted(userId) else emptyMap())
+            recentStyleWeights = if (suggestions) IosAffinitySignals.styleWeights(user.affinities) else emptyMap())
         val lookup = events.associateBy { it.key }
         val result = selectedKeys.mapNotNull(lookup::get)
-        platformWritePublicCache(prefix + "signature", signature)
-        platformWritePublicCache(prefix + "at", currentEpochMillis().toString())
-        platformWritePublicCache(prefix + "ordered_ids", if (result.isEmpty()) "~" else result.joinToString(",") { it.key })
+        memory[prefix + "signature"] = signature
+        memory[prefix + "at"] = currentEpochMillis().toString()
+        memory[prefix + "ordered_ids"] = if (result.isEmpty()) "~" else result.joinToString(",") { it.key }
         return result
     }
 }

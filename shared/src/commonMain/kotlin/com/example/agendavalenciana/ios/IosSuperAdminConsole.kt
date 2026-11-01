@@ -22,17 +22,18 @@ import kotlinx.serialization.json.put
  * This UI contains no credentials or API bypasses.
  */
 @Composable
-internal fun IosSuperAdminConsole(api: IosAgendaApi, actorId: Int, onMessage: (String) -> Unit) {
+internal fun IosSuperAdminConsole(api: IosAgendaApi, actorId: Int, initialSection: String = "Resum", onMessage: (String) -> Unit) {
     val scope = rememberCoroutineScope()
-    var section by remember(actorId) { mutableStateOf("Resum") }
+    var section by remember(actorId, initialSection) { mutableStateOf(initialSection) }
     var working by remember { mutableStateOf(false) }
-    var failure by remember { mutableStateOf("") }
-    var dashboard by remember { mutableStateOf<JsonObject?>(null) }
-    var users by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
-    var selectedUser by remember { mutableStateOf<JsonObject?>(null) }
-    var userDetail by remember { mutableStateOf<JsonObject?>(null) }
-    var pending by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
-    var reports by remember { mutableStateOf<List<JsonObject>>(emptyList()) }
+    var failure by remember(actorId) { mutableStateOf("") }
+    var dashboard by remember(actorId) { mutableStateOf<JsonObject?>(null) }
+    var users by remember(actorId) { mutableStateOf<List<JsonObject>>(emptyList()) }
+    var selectedUser by remember(actorId) { mutableStateOf<JsonObject?>(null) }
+    var userDetail by remember(actorId) { mutableStateOf<JsonObject?>(null) }
+    var pending by remember(actorId) { mutableStateOf<List<JsonObject>>(emptyList()) }
+    var reports by remember(actorId) { mutableStateOf<List<JsonObject>>(emptyList()) }
+    var professionalClaims by remember(actorId) { mutableStateOf<List<JsonObject>>(emptyList()) }
     var period by remember { mutableIntStateOf(30) }
 
     fun execute(task: suspend () -> Unit) {
@@ -48,6 +49,7 @@ internal fun IosSuperAdminConsole(api: IosAgendaApi, actorId: Int, onMessage: (S
     fun reload() = execute {
         when (section) {
             "Resum" -> dashboard = api.adminDashboard(period)
+            "Sol·licituds" -> professionalClaims = api.adminPendingProfessionalClaims()
             "Usuaris" -> users = api.adminUsers()
             "Publicacions" -> { pending = api.adminCommunityPending(); reports = api.adminEventReports() }
         }
@@ -57,6 +59,7 @@ internal fun IosSuperAdminConsole(api: IosAgendaApi, actorId: Int, onMessage: (S
         try {
             when (section) {
                 "Resum" -> dashboard = api.adminDashboard(period)
+                "Sol·licituds" -> professionalClaims = api.adminPendingProfessionalClaims()
                 "Usuaris" -> users = api.adminUsers()
                 "Publicacions" -> { pending = api.adminCommunityPending(); reports = api.adminEventReports() }
             }
@@ -67,7 +70,7 @@ internal fun IosSuperAdminConsole(api: IosAgendaApi, actorId: Int, onMessage: (S
     Text("Superadministració", fontWeight = FontWeight.Bold, fontSize = 20.sp)
     Text("Només el servidor pot autoritzar les operacions. La informació administrativa no es guarda en la caché local.", fontSize = 11.sp)
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        listOf("Resum", "Usuaris", "Publicacions", "Campanyes").forEach { name ->
+        listOf("Resum", "Usuaris", "Publicacions", "Sol·licituds", "Campanyes").forEach { name ->
             FilterChip(selected = section == name, onClick = { section = name; selectedUser = null; userDetail = null }, label = { Text(name) })
         }
     }
@@ -104,6 +107,47 @@ internal fun IosSuperAdminConsole(api: IosAgendaApi, actorId: Int, onMessage: (S
                     Text("${campaign.text("title")} · ${campaign.text("recipient_count")} destinataris · ${campaign.text("created_at")}", fontSize = 12.sp)
                 }
                 Text("Les xifres mostren només els recursos que el servidor pot consultar.", fontSize = 11.sp)
+            }
+        }
+        "Sol·licituds" -> {
+            Text("Revisió de reclamacions de perfils professionals", fontWeight = FontWeight.Bold)
+            if (professionalClaims.isEmpty()) Text("No hi ha reclamacions pendents.", fontSize = 12.sp)
+            professionalClaims.forEach { claim ->
+                val id = claim.text("id").toIntOrNull() ?: 0
+                if (id > 0) {
+                    var notes by remember(id) { mutableStateOf("") }
+                    var checked by remember(id) { mutableStateOf(false) }
+                    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text("#${id} · ${claim.text("requested_entity_name").ifBlank { claim.text("matched_profile_name") }}",
+                            fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                        Text("${claim.text("username")} · ${claim.text("relation_text")} · ${claim.text("contact_email")}", fontSize = 11.sp)
+                        OutlinedTextField(notes, { notes = it.take(1000); checked = false }, label = { Text("Observacions i motiu del rebuig") }, modifier = Modifier.fillMaxWidth())
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked, { checked = it }); Text("He comprovat les proves de vinculació amb este perfil", fontSize = 12.sp)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(enabled = !working && checked && IosAdminActionPolicy.validProfessionalClaim(id, false, notes), onClick = {
+                                checked = false
+                                val frozen = notes
+                                execute {
+                                    api.adminReviewProfessionalClaim(id, false, frozen)
+                                    professionalClaims = api.adminPendingProfessionalClaims()
+                                    onMessage("Rebuig confirmat després de consultar el servidor")
+                                }
+                            }) { Text("Rebutjar") }
+                            Button(enabled = !working && checked, onClick = {
+                                checked = false
+                                val frozen = notes
+                                execute {
+                                    api.adminReviewProfessionalClaim(id, true, frozen)
+                                    professionalClaims = api.adminPendingProfessionalClaims()
+                                    onMessage("Aprovació confirmada després de consultar el servidor")
+                                }
+                            }) { Text("Aprovar") }
+                        }
+                    }
+                    HorizontalDivider()
+                }
             }
         }
         "Usuaris" -> {
@@ -210,7 +254,7 @@ internal fun IosSuperAdminConsole(api: IosAgendaApi, actorId: Int, onMessage: (S
                 if (eventId > 0) AdminPendingSubmission(row, working) { decision, notes -> execute {
                     api.adminReviewCommunity(eventId, decision, notes)
                     pending = api.adminCommunityPending()
-                    onMessage("Revisió de la publicació registrada")
+                    onMessage("Revisió confirmada: la publicació ja no consta pendent al servidor")
                 } }
             }
             HorizontalDivider()
@@ -222,7 +266,7 @@ internal fun IosSuperAdminConsole(api: IosAgendaApi, actorId: Int, onMessage: (S
             AdminEventModeration(working, suggestedEventId = moderateId) { eventId, action, note -> execute {
                 api.adminModerateEvent(eventId, action, note)
                 reports = api.adminEventReports()
-                onMessage("Acció de moderació executada al servidor")
+                onMessage("Resposta de moderació rebuda. Actualitza l'esdeveniment per verificar-ne l'estat.")
             } }
         }
         "Campanyes" -> IosAdminCampaignComposer(api, working, ::execute, onMessage)

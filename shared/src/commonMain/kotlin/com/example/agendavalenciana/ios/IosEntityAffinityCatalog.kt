@@ -39,14 +39,12 @@ object IosEntityAffinityCatalog {
         }
         return snapshot
     }
-    suspend fun refresh(api: IosAgendaApi, force: Boolean = false): Map<String, Set<String>> {
+    internal suspend fun refresh(api: IosAgendaApi, force: Boolean = false): Map<String, Set<String>> {
         val old = cached()
         val age = currentEpochMillis() - updated
         if (!force && age in 0 until TTL && old.isNotEmpty()) return old
         return runCatching {
-            val response = api.entityStyles()
-            IosPersonalizationImages.ingest(response)
-            val incoming = decodeResponse(response)
+            val incoming = decodeResponse(api.entityStyles())
             if (incoming.isEmpty()) return@runCatching old
             snapshot = incoming
             updated = currentEpochMillis()

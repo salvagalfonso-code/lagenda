@@ -2,6 +2,7 @@ package com.example.agendavalenciana.ios
 
 import com.example.agendavalenciana.model.IosAccountCachePolicy
 import com.example.agendavalenciana.model.IosSavedAgendaPolicy
+import com.example.agendavalenciana.model.IosFestivalSession
 import com.example.agendavalenciana.model.IosSavedFestivalSlot
 import com.example.agendavalenciana.model.IosFestivalSavedSlotPolicy
 import androidx.compose.foundation.*
@@ -28,8 +29,6 @@ import coil3.compose.AsyncImage
 @Composable
 internal fun IosSavedAgendaScreen(
     accountId: Int,
-    authenticated: Boolean,
-    onLoginRequired: () -> Unit,
     user: IosUserState,
     lists: List<IosSavedList>,
     available: List<AgendaEventSummary>,
@@ -42,7 +41,9 @@ internal fun IosSavedAgendaScreen(
     onToggleSaved: (AgendaEventSummary) -> Unit,
     onDisableReminder: (AgendaEventSummary) -> Unit,
     reminderTime: (AgendaEventSummary) -> String,
-    festivalRevision: Int
+    festivalRevision: Int,
+    remoteFestivalSlots: (Int) -> Set<String>,
+    onSaveFestivalSlots: suspend (Int, Set<String>) -> Boolean
 ) {
     var remindersTab by remember(accountId) { mutableStateOf(false) }
     var listId by remember(accountId) { mutableStateOf<Int?>(null) }
@@ -51,32 +52,47 @@ internal fun IosSavedAgendaScreen(
     var createDialog by remember { mutableStateOf(false) }
     var joinDialog by remember { mutableStateOf(false) }
     var renameDialog by remember { mutableStateOf(false) }
-    var confirmDelete by remember { mutableStateOf(false) }
-    var shareData by remember { mutableStateOf<IosSavedListShare?>(null) }
+    var confirmDelete by remember(accountId) { mutableStateOf(false) }
+    var confirmRevoke by remember(accountId) { mutableStateOf(false) }
+    var shareData by remember(accountId) { mutableStateOf<IosSavedListShare?>(null) }
     var newName by remember { mutableStateOf("") }
     var inviteCode by remember { mutableStateOf("") }
     var renameName by remember { mutableStateOf("") }
     var addSearch by remember { mutableStateOf("") }
-    var localSlotRevision by remember(accountId) { mutableIntStateOf(0) }
+
     var slotToRemove by remember { mutableStateOf<Pair<AgendaEventSummary, IosSavedFestivalSlot>?>(null) }
     val selectedList = lists.firstOrNull { it.id == listId }
     val selectedIds = if (selectedList == null) {
         IosSavedAgendaPolicy.validEventIds(user.saved, lists.flatMap { it.eventIds }.toSet())
     } else selectedList.eventIds
     val eventsById = remember(available) { available.groupBy { it.id }.mapValues { it.value.first() } }
-    val displayed = remember(available, selectedIds, today) {
-        selectedIds.mapNotNull(eventsById::get).filter {
-            IosSavedAgendaPolicy.eventStillUpcoming(it.date, it.endDate, today)
+    val savedFestivals = available.filter { it.isFestival }.distinctBy { it.id }
+    val festivalSchedule = remember(accountId) { mutableStateMapOf<Int, List<AgendaScheduleEntry>>() }
+    val selectedFestivalIds = savedFestivals.filter {
+        it.id in selectedIds || remoteFestivalSlots(it.id).isNotEmpty()
+    }
+        .map { it.id }
+    LaunchedEffect(accountId, selectedFestivalIds, festivalRevision) {
+        selectedFestivalIds.forEach { eventId ->
+            // Do not fetch every festival in the public catalog, only those with saved slots.
+            runCatching { api.festivalSchedule(eventId) }.onSuccess { fresh ->
+                if (fresh.isNotEmpty()) festivalSchedule[eventId] = fresh
+            }
+        }
+    }
+    val displayed = remember(available, selectedIds, today, festivalSchedule.toMap()) {
+        selectedIds.mapNotNull(eventsById::get).filter { event ->
+            IosSavedAgendaPolicy.eventStillUpcoming(event.date, event.endDate, today,
+                (festivalSchedule[event.id] ?: event.schedule).map { it.date })
         }.distinctBy { it.id }
     }
-    // Saved festival performances are local on this device and scoped to this account.
-    // Only the General view aggregates them; a shared list contains events, not private slots.
-    val slots = remember(accountId, available, today, festivalRevision, localSlotRevision) {
-        available.filter { it.isFestival }.distinctBy { it.id }.flatMap { festival ->
-            val key = IosAccountCachePolicy.key("festival_schedule_${festival.id}", accountId.takeIf { authenticated })
-            val saved = IosFestivalSavedSlotPolicy.decode(platformReadPublicCache(key))
-            IosSavedAgendaPolicy.activeSlots(saved, festival.id, today).map { festival to it }
-        }
+    // Android resolves selected sessions against the actual programme. The 05:00
+    // cultural day applies; missing public schedules cannot invent performances.
+    val slots = savedFestivals.flatMap { festival ->
+        val schedule = festivalSchedule[festival.id] ?: festival.schedule
+        val selected = IosSavedAgendaPolicy.matchSlots(remoteFestivalSlots(festival.id), festival.id,
+            schedule.map { IosFestivalSession(it.date.take(10), it.time.take(5), it.artist, it.title, it.location) }, today)
+        selected.map { festival to it }
     }
     val rows = remember(displayed, slots, selectedList, today) {
         val eventRows: List<IosSavedAgendaRow> = displayed.map { IosSavedAgendaRow.Event(it) }
@@ -87,7 +103,6 @@ internal fun IosSavedAgendaScreen(
             .thenBy { it.time }.thenBy { it.sortId })
     }
     fun reloadLists(message: String) {
-        if (!authenticated) { onLoginRequired(); return }
         work { onListsChanged(api.savedLists()); onStatus(message) }
     }
 
@@ -127,9 +142,7 @@ internal fun IosSavedAgendaScreen(
                     }
                 }
                 Box(Modifier.height(53.dp).clip(RoundedCornerShape(12.dp))
-                    .background(AgendaBlack).clickable {
-                        if (authenticated) newListDialog = true else onLoginRequired()
-                    }
+                    .background(AgendaBlack).clickable { newListDialog = true }
                     .padding(horizontal = 12.dp), contentAlignment = Alignment.Center) {
                     Text("+ Nova llista", maxLines = 1, color = Color.White,
                         fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
@@ -138,12 +151,19 @@ internal fun IosSavedAgendaScreen(
             if (selectedList != null) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 15.dp),
                     horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (selectedList.owner && authenticated) {
+                    if (selectedList.owner) {
                         TextButton(onClick = {
-                            if (selectedList.shareCode.isNotBlank() && selectedList.inviteUrl.isNotBlank()) {
-                                shareData = IosSavedListShare(selectedList.inviteUrl, selectedList.shareCode)
-                            } else work { shareData = api.shareSavedList(selectedList.id) }
+                            val id = selectedList.id
+                            work {
+                                shareData = api.shareSavedList(id)
+                                onListsChanged(api.savedLists())
+                            }
                         }) { Text("Compartir", fontSize = 12.sp) }
+                        if (selectedList.shareCode.isNotBlank() || selectedList.inviteUrl.isNotBlank()) {
+                            TextButton(onClick = { confirmRevoke = true }) {
+                                Text("Revocar", fontSize = 12.sp)
+                            }
+                        }
                         TextButton(onClick = { renameName = selectedList.name; renameDialog = true }) {
                             Text("Editar", fontSize = 12.sp)
                         }
@@ -174,9 +194,10 @@ internal fun IosSavedAgendaScreen(
             }
         }
         if (remindersTab) {
-            val reminders = remember(available, user.alerts, today) {
+            val reminders = remember(available, user.alerts, today, festivalSchedule.toMap()) {
                 user.alerts.mapNotNull(eventsById::get)
-                    .filter { IosSavedAgendaPolicy.eventStillUpcoming(it.date, it.endDate, today) }
+                    .filter { IosSavedAgendaPolicy.eventStillUpcoming(it.date, it.endDate, today,
+                        (festivalSchedule[it.id] ?: it.schedule).map { slot -> slot.date }) }
                     .distinctBy { it.id }.sortedWith(compareBy<AgendaEventSummary> { it.date }.thenBy { it.time }.thenBy { it.id })
             }
             if (reminders.isEmpty()) Text("No tens recordatoris actius per a esdeveniments disponibles.",
@@ -262,6 +283,17 @@ internal fun IosSavedAgendaScreen(
             val id = selectedList.id; val name = renameName.trim(); renameDialog = false
             work { api.renameSavedList(id, name); onListsChanged(api.savedLists()); onStatus("Nom modificat") }
         }) { Text("Guardar") } }, dismissButton = { TextButton(onClick = { renameDialog = false }) { Text("Cancel·lar") } })
+    if (confirmRevoke && selectedList?.owner == true) AlertDialog(
+        onDismissRequest = { confirmRevoke = false },
+        title = { Text("Revocar els codis de la llista?") },
+        text = { Text("Els enllaços i codis actuals deixaran de funcionar. Les persones que ja compartixen la llista conservaran l'accés.") },
+        confirmButton = { TextButton(onClick = {
+            val id = selectedList.id; confirmRevoke = false
+            work { api.revokeSavedListSharing(id); onListsChanged(api.savedLists())
+                shareData = null; onStatus("Invitacions revocades") }
+        }) { Text("Revocar") } },
+        dismissButton = { TextButton(onClick = { confirmRevoke = false }) { Text("Cancel·lar") } }
+    )
     if (confirmDelete && selectedList != null) AlertDialog(onDismissRequest = { confirmDelete = false },
         title = { Text(if (selectedList.owner) "Eliminar esta llista?" else "Deixar de seguir la llista?") },
         text = { Text(if (selectedList.owner) "Els esdeveniments continuaran guardats a l'Agenda."
@@ -289,12 +321,13 @@ internal fun IosSavedAgendaScreen(
         AlertDialog(onDismissRequest = { slotToRemove = null }, title = { Text("Llevar actuació guardada?") },
             text = { Text(slot.title.ifBlank { slot.artist }) },
             confirmButton = { TextButton(onClick = {
-                val cacheKey = IosAccountCachePolicy.key("festival_schedule_${event.id}", accountId.takeIf { authenticated })
-                val current = IosFestivalSavedSlotPolicy.decode(platformReadPublicCache(cacheKey))
-                platformWritePublicCache(cacheKey, IosFestivalSavedSlotPolicy.encode(current - slot.originalKey))
-                slotToRemove = null
-                localSlotRevision++
-                onStatus("Actuació llevada de Guardats")
+                val current = remoteFestivalSlots(event.id)
+                work {
+                    val confirmed = onSaveFestivalSlots(event.id, IosSavedAgendaPolicy.withoutSession(current, slot))
+                    slotToRemove = null
+                    onStatus(if (confirmed) "Actuació llevada del servidor" else
+                        "Canvi xifrat pendent de sincronització")
+                }
             }) { Text("Llevar") } },
             dismissButton = { TextButton(onClick = { slotToRemove = null }) { Text("Mantindre") } })
     }

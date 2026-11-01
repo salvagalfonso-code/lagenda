@@ -1,15 +1,15 @@
 package com.example.agendavalenciana.ios
 
-import io.ktor.client.HttpClient
-import io.ktor.client.plugins.HttpTimeout
-import io.ktor.client.request.get
-import io.ktor.client.statement.bodyAsText
 import kotlinx.serialization.json.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 // This is the *actual* payload of api/events/index.php (not invented local demo data).
-data class AgendaScheduleEntry(val date: String, val time: String, val title: String, val artist: String, val location: String)
+data class AgendaScheduleEntry(
+    val date: String, val time: String, val title: String, val artist: String, val location: String,
+    val groupName: String = "", val itemType: String = "performance", val sortOrder: Int = 0,
+    val endTime: String = "", val details: String = ""
+)
 data class AgendaEventSummary(
     val id: Int, val title: String, val date: String, val time: String,
     val town: String, val venue: String, val category: String, val description: String,
@@ -18,10 +18,16 @@ data class AgendaEventSummary(
     val endDate: String = "", val ticketAvailable: Boolean = false, val ticketUrl: String = "",
     val price: String = "", val schedule: List<AgendaScheduleEntry> = emptyList(),
     val language: String = "", val updatedAt: String = "", val eventStructure: String = "",
-    val savedCount: Int = 0, val createdAt: String = ""
+    val savedCount: Int = 0,
+    // Only the feed projection changes by day. The event's canonical date, ID and
+    // schedule remain intact so the popup, saved items and tickets use one identity.
+    val feedOccurrenceDate: String = "", val comarca: String = ""
 ) {
-    val key get() = "${id}_${date}"
-    val isFestival get() = IosEventPopupPolicy.isFestival(this)
+    val displayDate get() = feedOccurrenceDate.ifBlank { date }
+    val key get() = "${id}_${displayDate}"
+    val isFestival get() = !category.contains("expos", ignoreCase = true) &&
+        (schedule.isNotEmpty() || (endDate.isNotBlank() && endDate != date) ||
+            eventStructure in setOf("FESTIVAL", "CYCLE", "PROGRAMME"))
     val names get() = artists + organizers
     fun matches(q: String): Boolean {
         val term = q.trim()
@@ -53,10 +59,6 @@ internal fun JsonObject.names(key: String): List<String> {
 internal fun JsonObject.arr(key: String): JsonArray = this[key] as? JsonArray ?: JsonArray(emptyList())
 
 object IosEventCatalog {
-    private const val ENDPOINT = "https://quimerafest.com/app/api/events/index.php"
-    private val client = HttpClient {
-        install(HttpTimeout) { requestTimeoutMillis = 15_000; connectTimeoutMillis = 10_000 }
-    }
     private const val CACHE_MS = 30L * 60L * 1000L
     private var saved: List<AgendaEventSummary> = emptyList()
     private var savedAtMs: Long = 0L
@@ -77,8 +79,6 @@ object IosEventCatalog {
         return saved
     }
     fun cacheAgeMs(): Long = (currentEpochMillis() - savedAtMs).coerceAtLeast(0L)
-    /** True only after the preview has been replaced by the full local/remote catalog. */
-    fun fullyHydrated(): Boolean { cached(); return !previewOnly }
     suspend fun get(force: Boolean = false): List<AgendaEventSummary> {
         val existing = cached()
         if (!force && existing.isNotEmpty() && cacheAgeMs() < CACHE_MS) {
@@ -94,7 +94,7 @@ object IosEventCatalog {
                 // A damaged full cache must not pin a partial catalog until the TTL expires.
             } else return existing
         }
-        val response = client.get(ENDPOINT).bodyAsText()
+        val response = IosServerConnection.publicJsonText("events/index.php")
         val root = withContext(Dispatchers.Default) {
             Json.parseToJsonElement(response) as? JsonObject ?: error("Resposta del catàleg invàlida")
         }
@@ -128,20 +128,18 @@ object IosEventCatalog {
             val title = obj.text("title")
             if (title.isBlank()) return@mapNotNull null
             AgendaEventSummary(
-                id = id, title = title, date = obj.text("feed_instance_date", "selected_date", "event_date", "start_date", "date").take(10),
+                id = id, title = title, date = obj.text("event_date", "start_date", "date", "feed_instance_date", "selected_date").take(10),
                 time = obj.text("start_time", "event_time", "time").take(5), town = obj.text("town"), venue = obj.text("venue"),
                 category = obj.text("categoria_principal_nova", "category"), description = obj.text("description").take(15000),
-                posterUrl = validMediaUrl(obj.text("poster_url")), subtitle = obj.text("subtitle"),
-                artists = obj.names("artists").ifEmpty {
-                    obj.text("artist_name", "artist").takeIf(String::isNotBlank)?.let { listOf(it) }.orEmpty()
-                },
+                posterUrl = validMediaUrl(obj.text("poster_url")), subtitle = obj.text("subtitle"), artists = obj.names("artists"),
                 organizers = obj.names("organizers"), styles = obj.names("styles"), endDate = obj.text("end_date"),
                 ticketAvailable = obj.bool("ticket_sales_enabled") || obj.bool("ticket_available") || obj.bool("ticket_enabled"),
                 ticketUrl = obj.text("ticket_url"), price = obj.text("ticket_price", "price"),
                 language = obj.text("language"), updatedAt = obj.text("updated_at"),
                 eventStructure = obj.text("event_structure").uppercase(),
                 savedCount = obj.text("saved_count").toIntOrNull()?.coerceAtLeast(0) ?: 0,
-                createdAt = obj.text("created_at"),
+                feedOccurrenceDate = obj.text("feed_instance_date", "selected_date").take(10),
+                comarca = obj.text("comarca", "county", "region"),
                 schedule = obj.items("schedule").map { s ->
                     AgendaScheduleEntry(s.text("date", "schedule_date", "start_at").take(10),
                         s.text("start_time", "time").ifBlank { s.text("start_at").drop(11).take(5) }.take(5),
@@ -155,15 +153,15 @@ object IosEventCatalog {
 internal fun validMediaUrl(raw: String): String = when {
     raw.startsWith("https://", true) -> raw
     raw.startsWith("http://", true) -> "" // don't embed insecure transport
-    raw.startsWith("/") -> "https://quimerafest.com${raw}"
-    raw.isNotBlank() && !raw.startsWith("data:", true) -> "https://quimerafest.com/app/${raw.trimStart('/')}"
+    raw.startsWith("/") -> "${IosServerConnection.SITE_BASE}${raw}"
+    raw.isNotBlank() && !raw.startsWith("data:", true) -> "${IosServerConnection.APP_BASE}${raw.trimStart('/')}"
     else -> ""
 }
 
 expect fun currentEpochMillis(): Long
 expect fun currentLocalDateIso(): String
-/** Dia de programació: la jornada acaba a les 05:00, no a mitjanit. */
-expect fun currentCulturalDateIso(): String
+/** Same 05:00 Europe/Madrid cultural-day boundary as Android AgendaState.agendaToday(). */
+expect fun currentAgendaDateIso(): String
 /** Non-sensitive on-device UI/cache data only. Tokens NEVER go here. */
 expect fun platformReadPublicCache(key: String): String
 expect fun platformWritePublicCache(key: String, value: String)

@@ -1,6 +1,6 @@
 package com.example.agendavalenciana.model
 
-/** One visual story circle per followed artist, not per server publication. */
+/** Same v336 home rule: >6 eligible followed artists, exactly six circles. */
 data class IosBatecArtistGroup(
     val key: String,
     val artist: String,
@@ -10,47 +10,55 @@ data class IosBatecArtistGroup(
 )
 
 object IosBatecArtistGroups {
-    private fun normal(value: String) = IosBatecTimelinePolicy.normal(value)
+    private val storyKeyPattern = Regex("(?:manual:\\d+|event:\\d+:.+|followed:.+)")
+    private fun normal(value: String) = IosBatecNames.canonical(value)
+    /** PHP seen.php only accepts event:ID (not Android's event:ID:artist). */
+    fun canonicalSeenKey(key: String): String =
+        if (key.startsWith("event:")) key.substringBefore(':', "event") + ":" +
+            key.substringAfter(':').substringBefore(':') else key
+    private fun isSeen(candidate: BatecCandidate, seen: Set<String>) =
+        candidate.storyKey in seen || canonicalSeenKey(candidate.storyKey) in seen
 
-    /** Android parity: seven followed artists enable six circles; grey placeholders are explicit. */
+    /** Stories come from the server and the Android-compatible projection; no unfollowed filler.
+     * Placeholders are always grey and may only represent a real followed artist.
+     */
     fun select(
         candidates: List<BatecCandidate>,
         followedArtists: Set<String>,
         seen: Set<String>,
-        nowMillis: Long = 0L,
-        minimumFollowedArtists: Int = 7
+        minimumArtists: Int = 6
     ): List<IosBatecArtistGroup> {
         val followed = followedArtists.map(::normal).filter(String::isNotBlank).toSet()
-        if (followed.size < minimumFollowedArtists) return emptyList()
+        if (followed.size <= 6) return emptyList()
         val grouped = linkedMapOf<String, MutableList<BatecCandidate>>()
-        val uniqueStoryKeys = hashSetOf<String>()
-        candidates.forEach { candidate ->
-            val artistKey = normal(candidate.artist)
-            if (IosBatecTimelinePolicy.isBatecKey(candidate.storyKey) &&
-                artistKey in followed && uniqueStoryKeys.add(candidate.storyKey)) {
-                grouped.getOrPut(artistKey) { mutableListOf() }.add(candidate)
+        val keys = hashSetOf<String>()
+        candidates.forEach { item ->
+            val artistKey = normal(item.artist)
+            if (item.storyKey.matches(storyKeyPattern) && artistKey in followed && keys.add(item.storyKey)) {
+                grouped.getOrPut(artistKey) { mutableListOf() }.add(item)
             }
         }
-        if (grouped.size < 6) return emptyList()
-        val ranked = grouped.map { (artistKey, items) ->
-            val keys = items.map { it.storyKey }
-            val unseen = items.filter { candidate ->
-                !candidate.isPlaceholder && candidate.storyKey !in seen &&
-                    IosBatecTimelinePolicy.recent(candidate.publishedAtMillis, nowMillis)
+        if (grouped.size < minimumArtists) return emptyList()
+        return grouped.map { (key, items) ->
+            val content = items.sortedWith(compareByDescending<BatecCandidate> {
+                it.sourceType != "FOLLOWED_PLACEHOLDER" && it.sourceType != "EVENT_FALLBACK" && !isSeen(it, seen)
+            }.thenByDescending { it.publishedAt }.thenBy { it.storyKey }).take(20)
+            val newestUnseen = content.filter { it.sourceType != "FOLLOWED_PLACEHOLDER" &&
+                it.sourceType != "EVENT_FALLBACK" && !isSeen(it, seen) }.maxOfOrNull { it.publishedAt }.orEmpty()
+            val newestAny = content.maxOfOrNull { it.publishedAt }.orEmpty()
+            Triple(key, content, newestUnseen to newestAny)
+        }.sortedWith(compareByDescending<Triple<String, List<BatecCandidate>, Pair<String, String>>> { it.third.first.isNotEmpty() }
+            .thenByDescending { it.third.first }.thenByDescending { it.third.second }.thenBy { it.first })
+            .take(6).map { (key, content, _) ->
+                val ordered = content.map { it.storyKey }
+                val unseen = content.firstOrNull { it.sourceType != "FOLLOWED_PLACEHOLDER" &&
+                    it.sourceType != "EVENT_FALLBACK" && !isSeen(it, seen) }
+                IosBatecArtistGroup(
+                    key, content.first().artist, ordered,
+                    unseen?.storyKey ?: ordered.first(),
+                    content.all { it.sourceType == "FOLLOWED_PLACEHOLDER" ||
+                        it.sourceType == "EVENT_FALLBACK" || isSeen(it, seen) }
+                )
             }
-            val mostRecent = items.maxOfOrNull { it.publishedAtMillis } ?: 0L
-            val newestUnseen = unseen.maxOfOrNull { it.publishedAtMillis } ?: 0L
-            val result = IosBatecArtistGroup(
-                key = artistKey,
-                artist = items.first().artist,
-                storyKeys = keys,
-                openingStoryKey = unseen.firstOrNull()?.storyKey ?: keys.first(),
-                allSeen = unseen.isEmpty()
-            )
-            Triple(result, newestUnseen, mostRecent)
-        }
-        return ranked.sortedWith(compareByDescending<Triple<IosBatecArtistGroup, Long, Long>> { it.second > 0L }
-            .thenByDescending { it.second }.thenByDescending { it.third }.thenBy { it.first.key })
-            .take(6).map { it.first }
     }
 }

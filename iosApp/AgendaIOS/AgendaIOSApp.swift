@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import UserNotifications
+import StripePaymentSheet
 
 /** The OS provides this token. The server, not the app, sends APNs notifications. */
 final class AgendaPushDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
@@ -28,10 +29,8 @@ final class AgendaPushDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         let data = response.notification.request.content.userInfo
         if let artist = data["artist_name"] as? String, !artist.isEmpty {
             AgendaKeychain.shared.didTapArtistNotification(artist)
-        } else if let eventId = (data["event_id"] as? NSNumber)?.intValue, eventId > 0 {
-            AgendaKeychain.shared.didTapEventNotification(eventId)
-        } else if let eventString = data["event_id"] as? String, let eventId = Int(eventString), eventId > 0 {
-            AgendaKeychain.shared.didTapEventNotification(eventId)
+        } else if let value = data["event_id"] as? Int, value > 0 {
+            AgendaKeychain.shared.didTapPushEvent(Int32(value))
         }
         completionHandler()
     }
@@ -45,18 +44,29 @@ struct AgendaIOSApp: App {
         WindowGroup {
             ContentView()
                 .preferredColorScheme(.light)
-                .onAppear {
-                // Only register if permission was previously granted; the bell/reminder
-                // flow requests permission in context rather than on first app launch.
-                AgendaKeychain.shared.ensureRemoteRegistrationIfPermitted()
-            }
+                .onOpenURL { url in
+                    // Stripe 3DS / bank-redirect authentication returns to this app.
+                    _ = StripeAPI.handleURLCallback(with: url)
+                }
                 .onChange(of: scenePhase) { phase in
                     switch phase {
-                    case .background: AgendaKeychain.shared.feedSceneMovedToBackground()
-                    case .active: AgendaKeychain.shared.feedSceneBecameActive()
+                    case .background: AgendaKeychain.shared.notifyFeedBackground()
+                    case .active:
+                        AgendaKeychain.shared.notifyFeedForeground()
+                        AgendaKeychain.shared.ensureRemoteRegistrationIfPermitted()
                     default: break
                     }
                 }
+                .onAppear {
+                let center = UNUserNotificationCenter.current()
+                center.getNotificationSettings { settings in
+                    // User preference in the server is restored by KMP first.
+                    // Never prompt for permission automatically at first launch.
+                    if settings.authorizationStatus != .notDetermined {
+                        AgendaKeychain.shared.ensureRemoteRegistrationIfPermitted()
+                    }
+                }
+            }
         }
     }
 }

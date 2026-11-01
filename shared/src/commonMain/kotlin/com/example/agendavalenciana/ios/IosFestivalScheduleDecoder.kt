@@ -11,8 +11,12 @@ object IosFestivalScheduleDecoder {
             val time = row.text("start_time", "time").ifBlank {
                 row.text("start_at").substringAfter(' ', "").take(5)
             }.take(5)
-            AgendaScheduleEntry(date, time, row.text("title"), row.text("artist_name", "group_name"),
-                row.text("stage", "location"))
+            AgendaScheduleEntry(date, time, row.text("title"), row.text("artist_name"),
+                row.text("stage", "location"), groupName = row.text("group_name"),
+                itemType = row.text("item_type").ifBlank { "performance" },
+                sortOrder = row.text("sort_order").toIntOrNull() ?: 0,
+                endTime = row.text("end_time", "end_at").takeLast(8).take(5),
+                details = row.text("details"))
         }.filter { it.date.isNotBlank() && (it.artist.isNotBlank() || it.title.isNotBlank()) }
         .distinctBy { listOf(it.date, it.time, it.artist, it.title, it.location) }
         .sortedWith(compareBy<AgendaScheduleEntry> { it.date }.thenBy { it.time })

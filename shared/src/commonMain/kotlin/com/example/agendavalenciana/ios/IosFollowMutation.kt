@@ -1,21 +1,30 @@
 package com.example.agendavalenciana.ios
 
-/** Immutable post-API-success follow state. Never delete another entity type with the same label. */
+/** Android v336 and PHP user-state/follow.php use the same stable entity_type + entity_key.
+ * The displayed label is metadata, never a primary key for removing another follow.
+ */
 object IosFollowMutation {
     val supported = setOf("ARTIST", "ORGANIZER", "VENUE", "CATEGORY")
+    fun canonicalKey(raw: String): String = raw.trim().replace(Regex("\\s+"), " ").lowercase()
+    fun sameKey(type: String, first: String, second: String): Boolean =
+        type.uppercase() in supported && canonicalKey(first).isNotBlank() &&
+            canonicalKey(first) == canonicalKey(second)
+
+    /** UI can accept a label when the catalog exposes no ID. Writes require entity_key. */
     fun contains(items: List<IosFollow>, type: String, keyOrLabel: String): Boolean =
-        type.uppercase() in supported && keyOrLabel.isNotBlank() && items.any {
+        type.uppercase() in supported && canonicalKey(keyOrLabel).isNotBlank() && items.any {
             it.type.equals(type, ignoreCase = true) &&
-                (it.key.equals(keyOrLabel, ignoreCase = true) || it.label.equals(keyOrLabel, ignoreCase = true))
+                (sameKey(type, it.key, keyOrLabel) ||
+                    (it.key.isBlank() && canonicalKey(it.label) == canonicalKey(keyOrLabel)))
         }
 
     fun updated(items: List<IosFollow>, type: String, key: String, label: String, follow: Boolean): List<IosFollow> {
-        require(type in supported) { "Tipus de seguiment no admés" }
-        require(key.isNotBlank() && label.isNotBlank()) { "Falta el nom de l'entitat" }
+        require(type.uppercase() in supported) { "Tipus de seguiment no admés" }
+        require(canonicalKey(key).isNotBlank() && label.isNotBlank()) { "Falta l'entitat" }
+        val cleanType = type.uppercase()
         val retained = items.filterNot {
-            it.type.equals(type, ignoreCase = true) &&
-                (it.key.equals(key, ignoreCase = true) || it.label.equals(label, ignoreCase = true))
+            it.type.equals(cleanType, ignoreCase = true) && sameKey(cleanType, it.key, key)
         }
-        return if (follow) retained + IosFollow(type, key.trim(), label.trim()) else retained
+        return if (follow) retained + IosFollow(cleanType, canonicalKey(key), label.trim()) else retained
     }
 }

@@ -1,0 +1,35 @@
+import com.example.agendavalenciana.ios.IosCommunityPolicy as P
+
+fun main() {
+    var n=0
+    fun yes(value:Boolean) {check(value) {"Prova pas32 fallida #$n"};n++}
+    yes(P.canOpenChat("ACCEPTED",true))
+    yes(!P.canOpenChat("PENDING",true))
+    yes(!P.canOpenChat("ACCEPTED",false))
+    yes(P.canSend("FULL","ACCEPTED"))
+    yes(!P.canSend("OPEN","REJECTED"))
+    yes(P.verifiedJoin("PENDING",19,19,"PENDING","PENDING"))
+    yes(P.verifiedJoin("ACCEPTED",19,19,"ACCEPTED","ACCEPTED"))
+    yes(!P.verifiedJoin("ACCEPTED",19,22,"ACCEPTED","ACCEPTED"))
+    yes(!P.verifiedJoin("ACCEPTED",19,19,"PENDING","ACCEPTED"))
+    yes(P.verifiedSentMessage(10,6," Hola ",40,10,6,"Hola"))
+    yes(!P.verifiedSentMessage(10,6,"Hola",40,11,6,"Hola"))
+    yes(!P.verifiedSentMessage(10,6,"Hola",40,10,8,"Hola"))
+    yes(!P.verifiedSentMessage(10,6,"Hola",40,10,6,"Altres"))
+    yes(!P.verifiedSentMessage(10,6,"Hola",0,10,6,"Hola"))
+    yes(P.validMessage("Hola"))
+    yes(!P.validMessage(" "))
+    yes(!P.validMessage("A".repeat(2001)))
+    yes(P.canStartPrivateInquiry(false,"OPEN",0))
+    yes(!P.canStartPrivateInquiry(false,"CLOSED",0))
+    yes(P.canStartPrivateInquiry(true,"CLOSED",2))
+    yes(!P.canStartPrivateInquiry(true,"OPEN",0))
+    yes(P.canRequestAccess("OPEN","NONE"))
+    yes(!P.canRequestAccess("FULL","NONE"))
+    yes(!P.canRequestAccess("OPEN","PENDING"))
+    yes(!P.canModerateMember(3,2,4))
+    yes(P.canModerateMember(3,3,4))
+    yes(P.canonicalMembership("pending")=="PENDING")
+    yes(P.canonicalMembership("BAD")=="NONE")
+    println("PAS32_JVM_PASS: $n asserts")
+}

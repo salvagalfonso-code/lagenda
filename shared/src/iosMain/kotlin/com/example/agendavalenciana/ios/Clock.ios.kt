@@ -2,6 +2,7 @@ package com.example.agendavalenciana.ios
 
 import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
+import platform.Foundation.NSTimeZone
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -12,18 +13,23 @@ actual fun currentEpochMillis(): Long = kotlin.time.Clock.System.now().toEpochMi
 actual fun currentLocalDateIso(): String = NSDateFormatter().apply {
     dateFormat = "yyyy-MM-dd"
 }.stringFromDate(NSDate())
-// El dia cultural canvia a les 05:00 de l'hora local, fins i tot amb canvi DST.
-actual fun currentCulturalDateIso(): String {
-    val now = NSDate()
-    val hour = NSDateFormatter().apply { dateFormat = "HH" }.stringFromDate(now).toIntOrNull() ?: 12
-    // En Kotlin/Native, NSDate exposa l'inicialitzador amb temps des de 2001-01-01,
-    // però no el constructor amb timeIntervalSince1970.
-    // Restem 12 h només per resoldre la data local del dia cultural anterior.
-    val day = if (hour < 5) NSDate(
-        timeIntervalSinceReferenceDate = currentEpochMillis() / 1000.0 - 978307200.0 - 43200.0
-    ) else now
-    return NSDateFormatter().apply { dateFormat = "yyyy-MM-dd" }.stringFromDate(day)
+
+actual fun currentAgendaDateIso(): String {
+    val madrid = NSTimeZone(name = "Europe/Madrid") ?: NSTimeZone.systemTimeZone
+    val localDate = NSDate()
+    val hour = NSDateFormatter().apply {
+        timeZone = madrid
+        dateFormat = "HH"
+    }.stringFromDate(localDate).toIntOrNull() ?: 12
+    // Only the calendar day is needed. Moving back 24h in absolute time reliably
+    // reaches yesterday before 05:00, including European DST transitions.
+    val culturalDate = if (hour < 5) NSDate(timeIntervalSinceNow = -86_400.0) else localDate
+    return NSDateFormatter().apply {
+        timeZone = madrid
+        dateFormat = "yyyy-MM-dd"
+    }.stringFromDate(culturalDate)
 }
+
 actual fun platformReadPublicCache(key: String): String =
     IosNativeBridge.current?.readCache(key).orEmpty()
 actual fun platformWritePublicCache(key: String, value: String) {

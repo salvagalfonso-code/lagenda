@@ -20,18 +20,19 @@ private val communityKinds = listOf(
     "CAR" to "Cotxe compartit", "TRANSPORT" to "Transport organitzat",
     "MEETUP" to "Quedades", "HOSTING" to "Allotjament compartit", "OTHER" to "Altres"
 )
-private fun kindName(id: String) = communityKinds.firstOrNull { it.first == id }?.second ?: "Altres"
+private fun kindName(id: String) = IosCommunityBoardContract.label(id)
 
 @Composable
 internal fun IosCommunityHub(groups: List<IosCommunityGroup>, api: IosAgendaApi,
-                              isAdmin: Boolean, authenticated: Boolean, reload: (Boolean) -> Unit, onOpen: (IosCommunityGroup) -> Unit) {
+                              currentUserId: Int, isAdmin: Boolean, reload: (Boolean) -> Unit, onOpen: (IosCommunityGroup) -> Unit) {
     var mine by remember { mutableStateOf(false) }
     var selectedKind by remember { mutableStateOf("") }
     var blockedOpen by remember { mutableStateOf(false) }
     var adminOpen by remember { mutableStateOf(false) }
+    var inboxOpen by remember { mutableStateOf(false) }
     val filtered = groups.filter { group ->
-        (selectedKind.isEmpty() || group.type == selectedKind) &&
-            (!mine || group.membership == "ACCEPTED" || group.creatorUserId == api.account?.id)
+        (selectedKind.isEmpty() || IosCommunityBoardContract.section(group.type) == selectedKind) &&
+            (!mine || group.membership in setOf("ACCEPTED", "CONTACT") || group.creatorUserId == currentUserId)
     }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
@@ -42,9 +43,10 @@ internal fun IosCommunityHub(groups: List<IosCommunityGroup>, api: IosAgendaApi,
         Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             FilterChip(selected = !mine, onClick = { mine = false; reload(false) }, label = { Text("Tots") })
             Spacer(Modifier.width(8.dp))
-            if (authenticated) FilterChip(selected = mine, onClick = { mine = true; reload(true) }, label = { Text("Els meus") })
+            FilterChip(selected = mine, onClick = { mine = true; reload(true) }, label = { Text("Els meus") })
             Spacer(Modifier.weight(1f))
-            if (authenticated) TextButton(onClick = { blockedOpen = true }) { Text("Bloquejats") }
+            TextButton(onClick = { inboxOpen = true }) { Text("Consultes") }
+            TextButton(onClick = { blockedOpen = true }) { Text("Bloquejats") }
             if (isAdmin) TextButton(onClick = { adminOpen = true }) { Text("Moderar") }
         }
         androidx.compose.foundation.lazy.LazyRow(contentPadding = PaddingValues(horizontal = 12.dp),
@@ -65,44 +67,34 @@ internal fun IosCommunityHub(groups: List<IosCommunityGroup>, api: IosAgendaApi,
                         if (g.description.isNotEmpty()) Text(g.description, maxLines=2, fontSize=13.sp)
                         if (g.origin.isNotEmpty()) Text("Origen: ${g.origin}", fontSize=11.sp)
                         if (g.meeting.isNotEmpty()) Text("Trobada: ${g.meeting}", fontSize=11.sp)
-                        Text("Participants: ${g.participants}",fontSize=11.sp)
+                        Text("Participants: ${g.participants}"+(if(!g.chatEnabled) " · Consultes privades" else ""),fontSize=11.sp)
                     }
                 }
             }
         }
     }
-    if (authenticated && blockedOpen) IosBlockedPeopleDialog(api) { blockedOpen = false; reload(mine) }
+    if(inboxOpen) IosCommunityPrivateInboxDialog(api,groups,currentUserId,onDismiss={inboxOpen=false})
+    if (blockedOpen) IosBlockedPeopleDialog(api) { blockedOpen = false; reload(mine) }
     if (adminOpen) IosAdminReportsDialog(api) { adminOpen = false; reload(mine) }
-}
-
-/** Public preview has no access to membership, messages, creator identity or private details. */
-@Composable
-internal fun IosGuestCommunityPreview(group: IosCommunityGroup, onDismiss: () -> Unit, onLogin: () -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(group.title) },
-        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Tauló cultural · ${kindName(group.type)}", fontSize = 13.sp)
-            Text(if (group.access == "OPEN") "Grup obert" else "Requerix aprovació", fontSize = 13.sp)
-            Text("Per consultar missatges, participar o escriure en el tauló, inicia sessió.", fontSize = 12.sp)
-        } },
-        confirmButton = { TextButton(onClick = onLogin) { Text("Iniciar sessió per participar") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Tancar") } })
 }
 
 @Composable
 internal fun IosCommunityChatDialog(initial: IosCommunityGroup, api: IosAgendaApi, currentUserId: Int,
                                      onDismiss: () -> Unit, onChanged: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var group by remember(initial.id) { mutableStateOf(initial) }
+    var group by remember(initial.id,currentUserId) { mutableStateOf(initial) }
     val creator = IosCommunityPolicy.isCreator(group.creatorUserId,currentUserId)
-    var membership by remember(initial.id) { mutableStateOf(initial.membership) }
-    var messages by remember(initial.id) { mutableStateOf(emptyList<IosMessage>()) }
-    var blocked by remember(initial.id) { mutableStateOf(emptySet<Int>()) }
-    var notice by remember(initial.id) { mutableStateOf("") }
-    var draft by remember(initial.id) { mutableStateOf("") }
-    var working by remember { mutableStateOf(false) }
+    var membership by remember(initial.id,currentUserId) { mutableStateOf(initial.membership) }
+    var messages by remember(initial.id,currentUserId) { mutableStateOf(emptyList<IosMessage>()) }
+    var blocked by remember(initial.id,currentUserId) { mutableStateOf(emptySet<Int>()) }
+    var notice by remember(initial.id,currentUserId) { mutableStateOf("") }
+    var draft by remember(initial.id,currentUserId) { mutableStateOf("") }
+    var working by remember(initial.id,currentUserId) { mutableStateOf(false) }
     var editing by remember { mutableStateOf(false) }
     var requestsOpen by remember { mutableStateOf(false) }
+    var privateOpen by remember { mutableStateOf(false) }
     var managing by remember { mutableStateOf(false) }
+    var participantsOpen by remember { mutableStateOf(false) }
     var reportMessage by remember { mutableStateOf<IosMessage?>(null) }
     var reportGroup by remember { mutableStateOf(false) }
     var blockPerson by remember { mutableStateOf<IosMessage?>(null) }
@@ -119,9 +111,14 @@ internal fun IosCommunityChatDialog(initial: IosCommunityGroup, api: IosAgendaAp
             finally { working = false }
         }
     }
-    LaunchedEffect(initial.id) {
+    LaunchedEffect(initial.id, currentUserId) {
+        runCatching { api.communityMemberState(group.id,group.eventId) }.onSuccess { latest ->
+            group=group.copy(membership=latest.membership,participants=latest.participants,
+                status=latest.status,members=latest.members)
+            membership=latest.membership
+        }.onFailure { notice=it.message ?: "No s'ha pogut comprovar l'accés al grup." }
         runCatching { api.blockedCommunityUsers() }.onSuccess { blocked=it.map { p -> p.id }.toSet() }
-        if (membership == "ACCEPTED") runCatching { api.messages(group.id) }
+        if (membership == "ACCEPTED" && group.chatEnabled) runCatching { api.messages(group.id) }
             .onSuccess { messages = it }.onFailure { notice = it.message ?: "No s'han pogut consultar els missatges." }
     }
     Dialog(onDismissRequest=onDismiss) {
@@ -137,8 +134,17 @@ internal fun IosCommunityChatDialog(initial: IosCommunityGroup, api: IosAgendaAp
                 if(group.origin.isNotBlank()) Text("Origen: ${group.origin}",fontSize=11.sp)
                 if(group.meeting.isNotBlank()) Text("Trobada: ${group.meeting}",fontSize=11.sp)
                 Row(Modifier.horizontalScroll(rememberScrollState()),verticalAlignment=Alignment.CenterVertically) {
-                    TextButton(onClick={launchAction { messages = api.messages(group.id) }},enabled=membership=="ACCEPTED" && !working) {Text("Actualitzar")}
+                    TextButton(onClick={launchAction { messages = api.messages(group.id) }},enabled=IosCommunityPolicy.canOpenChat(membership,group.chatEnabled) && !working) {Text("Actualitzar")}
                     TextButton(onClick={reportGroup=true}) {Text("Denunciar tauló")}
+                    TextButton(onClick={privateOpen=true}) {Text("Consultes privades")}
+                    TextButton(onClick={participantsOpen=true}) {Text("Membres")}
+                    TextButton(onClick={launchAction {
+                        val latest=api.communityMemberState(group.id,group.eventId)
+                        membership=latest.membership
+                        group=group.copy(membership=membership,participants=latest.participants,
+                            status=latest.status,members=latest.members)
+                        if(IosCommunityPolicy.canOpenChat(membership,group.chatEnabled))messages=api.messages(group.id)
+                    }},enabled=!working) {Text("Estat") }
                     if(creator) {
                         TextButton(onClick={editing=true}){Text("Editar")}
                         TextButton(onClick={requestsOpen=true}){Text("Sol·licituds")}
@@ -148,8 +154,11 @@ internal fun IosCommunityChatDialog(initial: IosCommunityGroup, api: IosAgendaAp
                 }
                 if(membership!="ACCEPTED") {
                     Button(onClick={launchAction {
-                        membership=api.joinGroup(group.id)
-                        if(membership=="ACCEPTED") messages=api.messages(group.id)
+                        membership=api.joinGroup(group.id,group.eventId,group.access)
+                        val remote=api.communityMemberState(group.id,group.eventId)
+                        group=group.copy(membership=membership,participants=remote.participants,
+                            members=remote.members,status=remote.status)
+                        if(membership=="ACCEPTED" && group.chatEnabled) messages=api.messages(group.id)
                         else notice="Sol·licitud pendent d'aprovació."
                         onChanged()
                     }},enabled=!working && IosCommunityPolicy.canRequestAccess(group.status,membership)) {
@@ -173,16 +182,30 @@ internal fun IosCommunityChatDialog(initial: IosCommunityGroup, api: IosAgendaAp
                         }
                     }
                 }
-                if(IosCommunityPolicy.canSend(group.status,membership)) Row(verticalAlignment=Alignment.CenterVertically) {
+                if(!group.chatEnabled) Text("Este tauló funciona amb consultes privades. Pots escriure al creador sense unir-te al xat.",fontSize=12.sp,color=Color.Gray)
+                if(group.chatEnabled && IosCommunityPolicy.canSend(group.status,membership)) Row(verticalAlignment=Alignment.CenterVertically) {
                     OutlinedTextField(value=draft,onValueChange={draft=it.take(2000)},modifier=Modifier.weight(1f),
                         label={Text("Missatge")},maxLines=3)
                     TextButton(enabled=draft.isNotBlank() && !working,onClick={launchAction {
-                        api.sendMessage(group.id,draft);draft="";messages=api.messages(group.id)
+                        val sent=api.sendMessage(group.id,draft)
+                        draft="";messages=(messages+sent).distinctBy { it.id }
+                        runCatching { api.messages(group.id) }.onSuccess { messages=it }
                     }}){Text("Enviar")}
                 }
             }
         }
     }
+    if(participantsOpen) AlertDialog(onDismissRequest={participantsOpen=false},
+        title={Text("Membres del tauló")},
+        text={Column(Modifier.heightIn(max=360.dp).verticalScroll(rememberScrollState())) {
+            if(group.members.isEmpty())Text("No hi ha membres confirmats.")
+            group.members.filter{it.status=="ACCEPTED"}.forEach {m->
+                Text("${m.name} · ${if(m.role=="CREATOR") "Creador" else "Membre"}",
+                    modifier=Modifier.padding(vertical=5.dp))
+            }
+        }},confirmButton={TextButton(onClick={participantsOpen=false}){Text("Tancar")}})
+    if(privateOpen) IosCommunityPrivateDialog(group,api,currentUserId,
+        onDismiss={privateOpen=false})
     if(editing) IosCommunityEditDialog(group,api,onDismiss={editing=false},onSaved={
         group=it;editing=false;onChanged()
     },onError={notice=it})
@@ -222,7 +245,7 @@ internal fun IosCommunityChatDialog(initial: IosCommunityGroup, api: IosAgendaAp
         }})
     if(leaveConfirm) IosCommunityConfirmDialog("Abandonar tauló?","No rebràs més missatges del grup.","Abandonar",
         onDismiss={leaveConfirm=false},onConfirm={launchAction {
-            api.leaveGroup(group.id);leaveConfirm=false;onChanged();onDismiss()
+            api.leaveGroup(group.id,group.eventId);leaveConfirm=false;onChanged();onDismiss()
         }})
 }
 
@@ -239,8 +262,95 @@ private fun IosCommunityReportDialog(title:String,onDismiss:()->Unit,onSend:(Str
     AlertDialog(onDismissRequest=onDismiss,title={Text(title)},
         text={Column { Text("Selecciona o explica el motiu.",fontSize=12.sp)
             OutlinedTextField(reason,{reason=it.take(500)},label={Text("Motiu")},minLines=2)
-        }}, confirmButton={TextButton(enabled=reason.isNotBlank(),onClick={onSend(reason)}){Text("Enviar denúncia")}},
+        }}, confirmButton={TextButton(enabled=reason.trim().isNotBlank(),onClick={onSend(reason.trim())}){Text("Enviar denúncia")}},
         dismissButton={TextButton(onClick=onDismiss){Text("Cancel·lar")}})
+}
+
+@Composable
+private fun IosCommunityPrivateInboxDialog(api:IosAgendaApi,groups:List<IosCommunityGroup>,currentUserId:Int,onDismiss:()->Unit) {
+    val scope=rememberCoroutineScope()
+    var items by remember { mutableStateOf(emptyList<IosCommunityInquiryInbox>()) }
+    var error by remember { mutableStateOf("") }
+    var selected by remember { mutableStateOf<IosCommunityInquiryInbox?>(null) }
+    fun reload() {scope.launch {runCatching {api.communityInbox()}
+        .onSuccess {items=it;error=""}.onFailure {error=it.message ?: "No es pot obrir la bústia privada."} }}
+    LaunchedEffect(Unit){reload()}
+    AlertDialog(onDismissRequest=onDismiss,title={Text("Consultes privades")},
+        text={Column(Modifier.heightIn(max=420.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            if(error.isNotBlank()) Text(error,color=Color.Red,fontSize=12.sp)
+            TextButton(onClick={reload()}) {Text("Actualitzar")}
+            items.distinctBy { it.groupId }.forEach { m ->
+                Column(Modifier.fillMaxWidth().clickable {selected=m}.padding(6.dp)) {
+                    Text(m.boardTitle,fontWeight=FontWeight.Bold,fontSize=13.sp)
+                    Text(m.body,maxLines=2,fontSize=12.sp)
+                }
+            }
+            if(items.isEmpty())Text("No tens consultes privades.")
+        }}, confirmButton={TextButton(onClick=onDismiss){Text("Tancar")}})
+    selected?.let {m->IosCommunityPrivateThreadDialog(m.groupId,m.boardTitle,api,
+        currentUserId=currentUserId,creatorUserId=groups.firstOrNull {it.id==m.groupId}?.creatorUserId ?: -1,
+        status=groups.firstOrNull {it.id==m.groupId}?.status ?: "OPEN",onDismiss={selected=null})}
+}
+
+@Composable
+private fun IosCommunityPrivateDialog(group:IosCommunityGroup,api:IosAgendaApi,currentUserId:Int,onDismiss:()->Unit) {
+    IosCommunityPrivateThreadDialog(group.id,group.title,api,currentUserId,
+        group.creatorUserId,group.status,onDismiss)
+}
+
+@Composable
+private fun IosCommunityPrivateThreadDialog(groupId:Int,title:String,api:IosAgendaApi,
+                                               currentUserId:Int,creatorUserId:Int,status:String,onDismiss:()->Unit) {
+    val scope=rememberCoroutineScope()
+    var messages by remember(groupId,currentUserId) { mutableStateOf(emptyList<IosCommunityInquiry>()) }
+    var peerId by remember(groupId,currentUserId) {mutableIntStateOf(0)}
+    var message by remember(groupId,currentUserId) {mutableStateOf("")}
+    var working by remember {mutableStateOf(false)}
+    var error by remember {mutableStateOf("")}
+    val isOwner=creatorUserId>0 && creatorUserId==currentUserId
+    fun refresh() {scope.launch {runCatching {api.communityInquiries(groupId)}
+        .onSuccess {messages=it;error=""}.onFailure {error=it.message ?: "No es poden consultar els missatges."}}}
+    LaunchedEffect(groupId,currentUserId) { refresh() }
+    val peers=messages.filter {it.peerUserId>0}.distinctBy{it.peerUserId}
+    val ownerView=isOwner || peers.any { it.peerUserId!=currentUserId && currentUserId>0 }
+    val visible=if(ownerView && peerId>0)messages.filter {it.peerUserId==peerId}
+        else if(ownerView) emptyList() else messages
+    AlertDialog(onDismissRequest=onDismiss,title={Text(title)},
+        text={Column(Modifier.heightIn(max=480.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            Text("Consultes privades · servidor",fontSize=12.sp,color=Color.Gray)
+            if(error.isNotBlank())Text(error,fontSize=12.sp,color=Color.Red)
+            TextButton(onClick={refresh()},enabled=!working){Text("Actualitzar")}
+            if(ownerView) {
+                Text("Selecciona una persona per respondre",fontSize=12.sp)
+                Row(Modifier.horizontalScroll(rememberScrollState())) {
+                    peers.forEach {p->FilterChip(selected=peerId==p.peerUserId,
+                        onClick={peerId=p.peerUserId},label={Text(p.peerName.ifBlank { "Usuari #${p.peerUserId}" })})}
+                }
+            }
+            LazyColumn(Modifier.weight(1f,fill=false),verticalArrangement=Arrangement.spacedBy(5.dp)) {
+                items(visible,key={it.id}){v->Column(Modifier.fillMaxWidth().background(Color(0xFFF6F5F8),RoundedCornerShape(9.dp)).padding(8.dp)){
+                    Text(v.author,fontWeight=FontWeight.Bold,fontSize=12.sp)
+                    Text(v.body,fontSize=13.sp)
+                    Text(v.createdAt,fontSize=10.sp,color=Color.Gray)
+                }}
+            }
+            OutlinedTextField(value=message,onValueChange={message=it.take(2000)},
+                label={Text("Missatge privat")},maxLines=3)
+        }},confirmButton={TextButton(enabled=!working && IosCommunityPolicy.validMessage(message) &&
+                IosCommunityPolicy.canStartPrivateInquiry(ownerView,status,peerId),
+            onClick={
+                val text=message.trim();working=true
+                scope.launch {try {
+                    api.sendCommunityInquiry(groupId,text,if(ownerView)peerId else null)
+                    message="";error=""
+                    runCatching { api.communityInquiries(groupId) }
+                        .onSuccess { messages=it }
+                        .onFailure { error="Enviat, però no s'ha pogut recarregar la conversa. Actualitza abans de reintentar." }
+                }catch(e:Exception){error=e.message ?: "No s'ha pogut enviar. Comprova l'historial abans de reintentar."}
+                finally{working=false}}
+            }){Text(if(working)"Enviant" else "Enviar")}},
+        dismissButton={TextButton(onClick=onDismiss){Text("Tancar")}})
 }
 
 @Composable
@@ -254,6 +364,7 @@ private fun IosCommunityEditDialog(g:IosCommunityGroup,api:IosAgendaApi,onDismis
     var capacity by remember(g.id){mutableStateOf(if(g.capacity>0)g.capacity.toString() else "")}
     var open by remember(g.id){mutableStateOf(g.access=="OPEN")}
     var kind by remember(g.id){mutableStateOf(g.type)}
+    var chatEnabled by remember(g.id){mutableStateOf(g.chatEnabled)}
     var working by remember {mutableStateOf(false)}
     AlertDialog(onDismissRequest=onDismiss,title={Text("Editar tauló")},
         text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(6.dp)) {
@@ -263,12 +374,15 @@ private fun IosCommunityEditDialog(g:IosCommunityGroup,api:IosAgendaApi,onDismis
             OutlinedTextField(meeting,{meeting=it.take(19)},label={Text("Trobada AAAA-MM-DD HH:MM")})
             OutlinedTextField(capacity,{capacity=it.filter(Char::isDigit).take(3)},label={Text("Places disponibles")})
             Row(verticalAlignment=Alignment.CenterVertically){Checkbox(open,{open=it});Text("Obert sense aprovació")}
-            communityKinds.forEach { (key,label)-> Row(Modifier.fillMaxWidth().clickable {kind=key},verticalAlignment=Alignment.CenterVertically) {
+            Row(verticalAlignment=Alignment.CenterVertically){Checkbox(chatEnabled,{chatEnabled=it});Text("Xat públic activat")}
+            (communityKinds + listOf("TRAIN" to "Tren", "NEED_HOSTING" to "Busque allotjament",
+                "COMPANY" to "Busque gent per anar", "WOMEN_ONLY" to "Sols xiques",
+                "VEG_FRIENDLY" to "Vegans / vegetarians", "LGBTQ_FRIENDLY" to "LGTBIQ+ friendly")).forEach { (key,label)-> Row(Modifier.fillMaxWidth().clickable {kind=key},verticalAlignment=Alignment.CenterVertically) {
                 RadioButton(selected=kind==key,onClick={kind=key});Text(label,fontSize=12.sp)
             } }
         }},confirmButton={TextButton(enabled=title.isNotBlank() && !working,onClick={
             working=true;scope.launch {try {onSaved(api.updateCommunityGroup(g,title,description,origin,meeting,
-                capacity.toIntOrNull()?:0,kind,if(open)"OPEN" else "APPROVAL"))}
+                capacity.toIntOrNull()?:0,kind,if(open)"OPEN" else "APPROVAL",chatEnabled))}
             catch(e:Exception){onError(e.message?:"No s'ha pogut editar")}
             finally{working=false} }
         }) {Text("Guardar")}},dismissButton={TextButton(onClick=onDismiss){Text("Cancel·lar")}})
@@ -285,8 +399,8 @@ private fun IosCommunityRequestsDialog(groupId:Int,api:IosAgendaApi,onDismiss:()
             if(members.isEmpty())Text("No hi ha peticions pendents.")
             members.forEach {m-> Row(verticalAlignment=Alignment.CenterVertically){
                 Text(m.displayName,modifier=Modifier.weight(1f))
-                TextButton(onClick={scope.launch {try {api.respondToMember(groupId,m.userId,true);members=members.filterNot{it.userId==m.userId};onChanged()}catch(e:Exception){error=e.message.orEmpty()}}}){Text("Sí")}
-                TextButton(onClick={scope.launch {try {api.respondToMember(groupId,m.userId,false);members=members.filterNot{it.userId==m.userId};onChanged()}catch(e:Exception){error=e.message.orEmpty()}}}){Text("No")}
+                TextButton(onClick={scope.launch {try {api.respondToMember(groupId,m.userId,true);members=api.pendingRequests(groupId);onChanged()}catch(e:Exception){error=e.message.orEmpty()}}}){Text("Sí")}
+                TextButton(onClick={scope.launch {try {api.respondToMember(groupId,m.userId,false);members=api.pendingRequests(groupId);onChanged()}catch(e:Exception){error=e.message.orEmpty()}}}){Text("No")}
             }}
         }},confirmButton={TextButton(onClick=onDismiss){Text("Tancar")}})
 }
@@ -365,11 +479,7 @@ private fun IosAdminReportsDialog(api:IosAgendaApi,onDismiss:()->Unit) {
                         Row(Modifier.horizontalScroll(rememberScrollState())) {
                             val actions=listOf("DISMISS" to "Descartar","REVIEW" to "Revisada",
                                 "DELETE_MESSAGE" to "Retirar missatge","CLOSE_GROUP" to "Tancar tauló","BAN_MEMBER" to "Expulsar")
-                            actions.filter {(_,label)-> when(label) {
-                                "Retirar missatge" -> r.messageId>0
-                                "Expulsar" -> r.reportedUserId>0 && r.groupId>0
-                                else -> true
-                            } }.forEach {(k,label)->TextButton(onClick={chosen=r;action=k}){Text(label,fontSize=11.sp)}}
+                            actions.filter {(key,_)-> IosCommunityModerationPolicy.eligibleAdmin(r,key) }.forEach {(k,label)->TextButton(onClick={chosen=r;action=k}){Text(label,fontSize=11.sp)}}
                         }
                     }
                 }}

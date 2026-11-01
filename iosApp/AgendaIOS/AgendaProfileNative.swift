@@ -204,6 +204,7 @@ extension AgendaKeychain {
     }
     func eraseLocalAccountData(userId: Int32) {
         guard userId > 0 else { return }
+        clearOfflineTickets(ownerId: userId)
         let suffix = "_\(userId)"
         // Only delete this account's settings; retain unrelated users and shared event catalog.
         for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("agenda_kmp_") {
