@@ -1,49 +1,47 @@
 workflows:
   ios_simulator:
-    name: LAgenda iOS Simulator (ARM64) · Diagnostic correction 01
+    name: LAgenda iOS Simulator ARM64 - Correccio 02
     instance_type: mac_mini_m2
     max_build_duration: 120
     environment:
       vars:
         JAVA_TOOL_OPTIONS: "-Xmx4g"
     scripts:
-      - name: Verificar correccio i compilar iOS Simulator
+      - name: Compilar iOS Simulator i mostrar errors reals
         script: |
           #!/usr/bin/env bash
           set -euo pipefail
+
+          : "${CM_BUILD_DIR:?Falta CM_BUILD_DIR}"
           mkdir -p "$CM_BUILD_DIR/artifacts"
+
           if [ -d "$CM_BUILD_DIR/ANDROID_STUDIO/iosApp/AgendaIOS.xcodeproj" ]; then
             cd "$CM_BUILD_DIR/ANDROID_STUDIO"
-          else
+          elif [ -d "$CM_BUILD_DIR/iosApp/AgendaIOS.xcodeproj" ]; then
             cd "$CM_BUILD_DIR"
+          else
+            echo 'ERROR: no trobe iosApp/AgendaIOS.xcodeproj.'
+            exit 2
           fi
 
-          test -d iosApp/AgendaIOS.xcodeproj
           test -f shared/build.gradle.kts
           test -f gradlew
-          test -f CODEMAGIC_SOURCE_SHA256.txt
+
+          CLOCK="shared/src/iosMain/kotlin/com/example/agendavalenciana/ios/Clock.ios.kt"
+          test -f "$CLOCK"
+          if ! grep -Fq 'NSTimeZone.timeZoneWithName("Europe/Madrid")' "$CLOCK"; then
+            echo 'ERROR: el projecte no conte Clock.ios.kt de la correccio 02.'
+            grep -n 'NSTimeZone' "$CLOCK" || true
+            exit 3
+          fi
+
+          echo 'CORRECCIO_02_DETECTADA: SI'
+          echo "PROJECTE: $(pwd)"
+          if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            echo "COMMIT: $(git rev-parse --short HEAD)"
+          fi
 
           LOG="$CM_BUILD_DIR/artifacts/xcodebuild.log"
-          CHECK="$CM_BUILD_DIR/artifacts/codi_verificat.log"
-
-          echo '=== IDENTITAT DEL CODI QUE COMPILA CODEMAGIC ==='
-          if command -v git >/dev/null && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            echo "Commit: $(git rev-parse --short HEAD)"
-          fi
-          cat CODEMAGIC_SOURCE_SHA256.txt
-
-          # Make an old/partial deployment fail before the slow Xcode compilation.
-          if shasum -a 256 --check CODEMAGIC_SOURCE_SHA256.txt > "$CHECK" 2>&1; then
-            cat "$CHECK"
-            echo 'CORRECCIO_01_VERIFICADA: sí'
-          else
-            cat "$CHECK"
-            echo 'ERROR: falten canvis del ZIP CORRECCIO_01 en el checkout de Codemagic.'
-            echo 'Actualitza la branca o el projecte que usa esta compilació.'
-            exit 20
-          fi
-
-          echo '=== COMPILANT KOTLIN NATIVE I IOS ==='
           if xcodebuild build \
             -project iosApp/AgendaIOS.xcodeproj \
             -scheme AgendaIOS \
@@ -54,13 +52,12 @@ workflows:
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO > "$LOG" 2>&1; then
-            echo 'BUILD SUCCEEDED'
+            echo 'XCODEBUILD: OK'
           else
-            echo '=== PRIMERS ERRORS CONCRETS (no sols el resum final) ==='
-            grep -nE 'error:|^e: |Unresolved reference|Compilation finished with errors|BUILD FAILED' "$LOG" | head -100 || true
-            echo '=== ULTIMES 20 LINIES ==='
-            tail -20 "$LOG"
-            echo "REGISTRE COMPLET: $LOG"
+            echo '=== ERRORS CONCRETS ==='
+            grep -nE 'error:|^e: |Compilation finished with errors|BUILD FAILED|Unresolved reference|failed' "$LOG" | head -100 || true
+            echo '=== ULTIMES 30 LINIES ==='
+            tail -30 "$LOG"
             exit 65
           fi
 
