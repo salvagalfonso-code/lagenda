@@ -99,7 +99,7 @@ object IosNativeBridge {
     var current: IosSessionBridge? = null
 }
 
-class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
+internal class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
     /** Serialise account-changing operations; a delayed HTTP response must never
      * revoke or overwrite another user's authenticated Keychain session. */
     private val accountTransitionMutex = Mutex()
@@ -2685,12 +2685,12 @@ class IosAgendaApi(private val sessionBridge: IosSessionBridge? = null) {
                 val id = item.text("id").toIntOrNull()?.takeIf { it > 0 } ?: return@forEach
                 val eventId = item.text("event_id").toIntOrNull() ?: return@forEach
                 val key = item.text("story_key").ifBlank { "manual:$id" }
-                manual.putIfAbsent(key, IosBatec(
+                manual.getOrPut(key) { IosBatec(
                     id.toString(), eventId, item.text("event_artist", "author_name", "author_username"),
                     item.text("event_title", "title"), item.text("body", "caption", "text"),
                     validMediaUrl(item.text("image_url", "media_url")), key, "MANUAL",
                     item.text("published_at"), item.text("event_date")
-                ))
+                ) }
             }
             val nextOffset = page.text("next_offset").toIntOrNull()?.takeIf { it > offset }
                 ?: offset + items.size

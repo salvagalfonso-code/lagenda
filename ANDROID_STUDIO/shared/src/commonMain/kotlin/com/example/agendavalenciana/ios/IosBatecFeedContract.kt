@@ -40,7 +40,7 @@ object IosBatecFeedContract {
                 else artistForEvent(event, eligibleKeys)?.let { byKey[norm(it)] }
             if (artist == null) continue
             val key = item.storyKey.takeIf { it.matches(Regex("manual:\\d+")) } ?: continue
-            result.putIfAbsent(key, item.copy(artist = artist, sourceType = "MANUAL", eventDate = event.date))
+            result.getOrPut(key) { item.copy(artist = artist, sourceType = "MANUAL", eventDate = event.date) }
             directManualPairs += item.eventId to norm(artist)
         }
         // Only events expressly returned by the existing 48-hour server API become fresh auto Batecs.
@@ -52,12 +52,12 @@ object IosBatecFeedContract {
             for (artist in names) {
                 if ((event.id to norm(artist)) in directManualPairs) continue
                 val key = "event:${event.id}:${norm(artist)}"
-                result.putIfAbsent(key, IosBatec(
+                result.getOrPut(key) { IosBatec(
                     id = "auto_${event.id}", eventId = event.id, artist = artist,
                     eventTitle = event.title, text = listOf(event.town, event.date, event.time)
                         .filter(String::isNotBlank).joinToString(" · "), imageUrl = event.posterUrl,
                     storyKey = key, sourceType = "AUTO_EVENT", publishedAt = published, eventDate = event.date
-                ))
+                ) }
             }
         }
         // Android also gives a last known upcoming event, otherwise a grey empty circle.
@@ -68,13 +68,13 @@ object IosBatecFeedContract {
                 .maxWithOrNull(compareBy<AgendaEventSummary> { it.updatedAt }.thenBy { it.id })
             if (last != null) {
                 val key = "event:${last.id}:${norm(artist)}"
-                result.putIfAbsent(key, IosBatec("fallback_${last.id}", last.id, artist, last.title,
+                result.getOrPut(key) { IosBatec("fallback_${last.id}", last.id, artist, last.title,
                     "${last.town} · ${last.date} · ${last.time}", last.posterUrl,
-                    key, "EVENT_FALLBACK", last.updatedAt, last.date))
+                    key, "EVENT_FALLBACK", last.updatedAt, last.date) }
             } else {
                 val key = "followed:${norm(artist)}"
-                result.putIfAbsent(key, IosBatec("placeholder", 0, artist, "", "Sense novetats", "",
-                    key, "FOLLOWED_PLACEHOLDER"))
+                result.getOrPut(key) { IosBatec("placeholder", 0, artist, "", "Sense novetats", "",
+                    key, "FOLLOWED_PLACEHOLDER") }
             }
         }
         return result.values.toList()

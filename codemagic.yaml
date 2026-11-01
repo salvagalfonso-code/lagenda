@@ -1,13 +1,13 @@
 workflows:
   ios_simulator:
-    name: LAgenda iOS Simulator (ARM64)
+    name: LAgenda iOS Simulator (ARM64) · Diagnostic correction 01
     instance_type: mac_mini_m2
     max_build_duration: 120
     environment:
       vars:
         JAVA_TOOL_OPTIONS: "-Xmx4g"
     scripts:
-      - name: Compilar iOS Simulator amb Xcode
+      - name: Verificar correccio i compilar iOS Simulator
         script: |
           #!/usr/bin/env bash
           set -euo pipefail
@@ -17,10 +17,34 @@ workflows:
           else
             cd "$CM_BUILD_DIR"
           fi
+
           test -d iosApp/AgendaIOS.xcodeproj
           test -f shared/build.gradle.kts
           test -f gradlew
-          xcodebuild build \
+          test -f CODEMAGIC_SOURCE_SHA256.txt
+
+          LOG="$CM_BUILD_DIR/artifacts/xcodebuild.log"
+          CHECK="$CM_BUILD_DIR/artifacts/codi_verificat.log"
+
+          echo '=== IDENTITAT DEL CODI QUE COMPILA CODEMAGIC ==='
+          if command -v git >/dev/null && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            echo "Commit: $(git rev-parse --short HEAD)"
+          fi
+          cat CODEMAGIC_SOURCE_SHA256.txt
+
+          # Make an old/partial deployment fail before the slow Xcode compilation.
+          if shasum -a 256 --check CODEMAGIC_SOURCE_SHA256.txt > "$CHECK" 2>&1; then
+            cat "$CHECK"
+            echo 'CORRECCIO_01_VERIFICADA: sí'
+          else
+            cat "$CHECK"
+            echo 'ERROR: falten canvis del ZIP CORRECCIO_01 en el checkout de Codemagic.'
+            echo 'Actualitza la branca o el projecte que usa esta compilació.'
+            exit 20
+          fi
+
+          echo '=== COMPILANT KOTLIN NATIVE I IOS ==='
+          if xcodebuild build \
             -project iosApp/AgendaIOS.xcodeproj \
             -scheme AgendaIOS \
             -configuration Debug \
@@ -29,12 +53,22 @@ workflows:
             -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
             ARCHS=arm64 \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            2>&1 | tee "$CM_BUILD_DIR/artifacts/xcodebuild.log"
+            CODE_SIGNING_REQUIRED=NO > "$LOG" 2>&1; then
+            echo 'BUILD SUCCEEDED'
+          else
+            echo '=== PRIMERS ERRORS CONCRETS (no sols el resum final) ==='
+            grep -nE 'error:|^e: |Unresolved reference|Compilation finished with errors|BUILD FAILED' "$LOG" | head -100 || true
+            echo '=== ULTIMES 20 LINIES ==='
+            tail -20 "$LOG"
+            echo "REGISTRE COMPLET: $LOG"
+            exit 65
+          fi
+
           APP="$CM_BUILD_DIR/DerivedData/Build/Products/Debug-iphonesimulator/AgendaIOS.app"
           test -d "$APP"
           cd "$(dirname "$APP")"
           ditto -c -k --keepParent AgendaIOS.app "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
+          echo 'APP SIMULADOR GENERADA'
     artifacts:
       - artifacts/*.zip
       - artifacts/*.log

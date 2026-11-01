@@ -52,7 +52,7 @@ object IosFestivalPopupPolicy {
         val result = linkedMapOf<String, Pair<String, String>>()
         fun append(label: String, query: String) {
             val k = label.trim().lowercase()
-            if (k.isNotBlank() && query.isNotBlank()) result.putIfAbsent(k, label.trim() to query.trim())
+            if (k.isNotBlank() && query.isNotBlank()) result.getOrPut(k) { label.trim() to query.trim() }
         }
         val base = listOf(venue, town).filter(String::isNotBlank).distinct().joinToString(", ")
         append(venue.ifBlank { town }, base)

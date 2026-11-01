@@ -39,7 +39,7 @@ object IosEntityAffinityCatalog {
         }
         return snapshot
     }
-    suspend fun refresh(api: IosAgendaApi, force: Boolean = false): Map<String, Set<String>> {
+    internal suspend fun refresh(api: IosAgendaApi, force: Boolean = false): Map<String, Set<String>> {
         val old = cached()
         val age = currentEpochMillis() - updated
         if (!force && age in 0 until TTL && old.isNotEmpty()) return old

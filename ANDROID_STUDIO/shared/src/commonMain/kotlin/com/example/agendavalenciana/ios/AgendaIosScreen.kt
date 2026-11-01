@@ -181,14 +181,6 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var publisherMenuOpen by remember { mutableStateOf(false) }
     var adminDestination by remember { mutableStateOf("Resum") }
     var serverPublisherAccess by remember { mutableStateOf<IosPublisherSnapshot?>(null) }
-    LaunchedEffect(account?.id, tab) {
-        val id = account?.id
-        serverPublisherAccess = null
-        if (id != null && tab == "Perfil") {
-            val verified = runCatching { api.publisherSnapshot() }.getOrNull()
-            if (account?.id == id) serverPublisherAccess = verified
-        }
-    }
     var loginOpen by remember { mutableStateOf(false) }
     var registrationOpen by remember { mutableStateOf(false) }
     var resetOpen by remember { mutableStateOf(false) }
@@ -197,6 +189,14 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     var communityGroup by remember { mutableStateOf<IosCommunityGroup?>(null) }
     var user by remember { mutableStateOf(IosUserState()) }
     var account by remember { mutableStateOf<IosAccount?>(null) }
+    LaunchedEffect(account?.id, tab) {
+        val id = account?.id
+        serverPublisherAccess = null
+        if (id != null && tab == "Perfil") {
+            val verified = runCatching { api.publisherSnapshot() }.getOrNull()
+            if (account?.id == id) serverPublisherAccess = verified
+        }
+    }
     // Pas 4: never persist the server snapshot on the phone; keep it only in RAM.
     // Its revision is useful for future optimistic writes in step 5.
     var serverState by remember { mutableStateOf<IosHydratedServerState?>(null) }
@@ -376,43 +376,6 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
     /** On network failure retain ONLY the pre-fetched encrypted tickets for the same owner.
      * Never treat the cached status as authoritative for entry validation.
      */
-    suspend fun reloadMyTickets() {
-        // An offline relaunch cannot call auth/me.php. Show already encrypted QR first,
-        // then try restoring the registered session if the network has returned.
-        if (account == null && api.hasRegisteredSessionToken()) {
-            api.offlineTickets()?.let { cached ->
-                tickets = cached; ticketsOffline = true
-                ticketLoadNotice = "Còpia sense connexió. L'estat necessita confirmació del servidor."
-            }
-            val restored = api.restoreAccount()
-            if (restored != null && account == null) {
-                account = restored; useAccountPreferences(restored.id); loadAccountPages()
-            }
-        }
-        val expectedOwner = account?.id ?: guestReadyUserId ?: api.activePersonalId()
-        val hasSecureOwner = expectedOwner != null || api.hasRegisteredSessionToken()
-        if (!hasSecureOwner) { tickets = emptyList(); ticketsOffline = false; return }
-        val result = if (expectedOwner != null) runCatching { api.tickets() } else null
-        if (expectedOwner != (account?.id ?: guestReadyUserId ?: api.activePersonalId())) return
-        if (result?.isSuccess == true) {
-            tickets = result.getOrThrow()
-            ticketsOffline = false
-            ticketLoadNotice = if (api.offlineTickets() == null)
-                "Entrades carregades del servidor. No s'ha pogut conservar una còpia xifrada per a ús sense connexió."
-                else ""
-        } else {
-            val cached = api.offlineTickets()
-            if (cached != null) {
-                tickets = cached
-                ticketsOffline = true
-                ticketLoadNotice = "Còpia xifrada per a ús sense connexió. L'estat pot haver canviat; no confirma validesa."
-            } else {
-                tickets = emptyList()
-                ticketsOffline = false
-                ticketLoadNotice = "No s'han pogut recuperar entrades. Necessites connexió per descarregar-les una primera vegada."
-            }
-        }
-    }
     fun loadAccountPages() {
         val expectedAccount = account?.id ?: return
         val followRevisionBeforeRead = followEditRevision
@@ -466,6 +429,43 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                     if (presetsRevisionBeforeRead == searchPresetRevision)
                         newPresets?.let { searchPresets = it }
                 }
+            }
+        }
+    }
+    suspend fun reloadMyTickets() {
+        // An offline relaunch cannot call auth/me.php. Show already encrypted QR first,
+        // then try restoring the registered session if the network has returned.
+        if (account == null && api.hasRegisteredSessionToken()) {
+            api.offlineTickets()?.let { cached ->
+                tickets = cached; ticketsOffline = true
+                ticketLoadNotice = "Còpia sense connexió. L'estat necessita confirmació del servidor."
+            }
+            val restored = api.restoreAccount()
+            if (restored != null && account == null) {
+                account = restored; useAccountPreferences(restored.id); loadAccountPages()
+            }
+        }
+        val expectedOwner = account?.id ?: guestReadyUserId ?: api.activePersonalId()
+        val hasSecureOwner = expectedOwner != null || api.hasRegisteredSessionToken()
+        if (!hasSecureOwner) { tickets = emptyList(); ticketsOffline = false; return }
+        val result = if (expectedOwner != null) runCatching { api.tickets() } else null
+        if (expectedOwner != (account?.id ?: guestReadyUserId ?: api.activePersonalId())) return
+        if (result?.isSuccess == true) {
+            tickets = result.getOrThrow()
+            ticketsOffline = false
+            ticketLoadNotice = if (api.offlineTickets() == null)
+                "Entrades carregades del servidor. No s'ha pogut conservar una còpia xifrada per a ús sense connexió."
+                else ""
+        } else {
+            val cached = api.offlineTickets()
+            if (cached != null) {
+                tickets = cached
+                ticketsOffline = true
+                ticketLoadNotice = "Còpia xifrada per a ús sense connexió. L'estat pot haver canviat; no confirma validesa."
+            } else {
+                tickets = emptyList()
+                ticketsOffline = false
+                ticketLoadNotice = "No s'han pogut recuperar entrades. Necessites connexió per descarregar-les una primera vegada."
             }
         }
     }
@@ -1792,7 +1792,7 @@ fun AgendaIosScreen(sessionBridge: IosSessionBridge? = null) {
                         "preferred_comarques_$username" to IosPersonalEncoded.strings(savedComarques),
                         "preferred_location_radii_$username" to IosPersonalEncoded.string(
                             kotlinx.serialization.json.buildJsonObject {
-                                savedRadii.forEach { (town, radius) -> put(town, radius) }
+                                savedRadii.forEach { (town, radius) -> put(town, kotlinx.serialization.json.JsonPrimitive(radius)) }
                             }.toString()),
                         "show_suggestions" to IosPersonalEncoded.bool(suggestions),
                         "discovery_level" to IosPersonalEncoded.string(discovery.name),

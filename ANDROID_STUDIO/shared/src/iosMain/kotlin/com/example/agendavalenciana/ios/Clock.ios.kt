@@ -15,7 +15,7 @@ actual fun currentLocalDateIso(): String = NSDateFormatter().apply {
 }.stringFromDate(NSDate())
 
 actual fun currentAgendaDateIso(): String {
-    val madrid = NSTimeZone.timeZoneWithName("Europe/Madrid")
+    val madrid = NSTimeZone(name = "Europe/Madrid") ?: NSTimeZone.systemTimeZone
     val localDate = NSDate()
     val hour = NSDateFormatter().apply {
         timeZone = madrid
@@ -23,8 +23,7 @@ actual fun currentAgendaDateIso(): String {
     }.stringFromDate(localDate).toIntOrNull() ?: 12
     // Only the calendar day is needed. Moving back 24h in absolute time reliably
     // reaches yesterday before 05:00, including European DST transitions.
-    val culturalDate = if (hour < 5) NSDate.dateWithTimeIntervalSince1970(
-        localDate.timeIntervalSince1970 - 86_400.0) else localDate
+    val culturalDate = if (hour < 5) NSDate(timeIntervalSinceNow = -86_400.0) else localDate
     return NSDateFormatter().apply {
         timeZone = madrid
         dateFormat = "yyyy-MM-dd"
