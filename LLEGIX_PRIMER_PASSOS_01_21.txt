@@ -1,0 +1,11 @@
+L'AGENDA iOS v349 · Lliurament 07 acumulatiu · passos 1–21
+
+ANDROID_STUDIO/ és el projecte complet iOS KMP amb la còpia Android v349 intacta.
+COMPROVACIONS/PAS_21_BATECS_VISOR_GESTOS.md conté canvis, proves i límits.
+Els originals Android v336 i servidor no s'han modificat.
+Pas 21: Batecs amb cercles i grisos, gestos laterals, visor 9:16, 15s, ordre estable,
+retorn al principi, botó seguir i protecció de canvis de compte.
+No hi ha compilació completa en iPhone ni prova real MariaDB; les proves de política
+Kotlin/JVM i comprovacions estàtiques no substituïxen la prova visual i tàctil real.
+Els passos 18 i 12 tenen les seues limitacions de paritat documentades.
+Pròxim ZIP: després del pas 24.

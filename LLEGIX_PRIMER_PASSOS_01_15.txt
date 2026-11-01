@@ -1,0 +1,8 @@
+L'AGENDA · iOS v349 · Lliurament 05 acumulatiu · passos 1–15
+
+ANDROID_STUDIO/ és el projecte complet iOS Kotlin Multiplatform amb la còpia Android inclosa original (NO modificar).
+COMPROVACIONS/PAS_15_PUBLICITAT_VENDA_INTERNA.md descriu canvis i advertiments.
+Android v336 i PHP no s'han modificat.
+No hi ha compilació completa verificada en iPhone ni prova contra base de dades real.
+Per a executar la compilació en un Mac amb Xcode i Gradle disponibles, consultar els scripts de COMPROVACIONS.
+Pròxim ZIP: després del pas 18.

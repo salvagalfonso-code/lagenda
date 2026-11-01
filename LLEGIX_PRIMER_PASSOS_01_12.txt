@@ -1,0 +1,7 @@
+L'AGENDA · iOS v349 · Lliurament 04 acumulatiu, passos 1–12
+
+ANDROID_STUDIO/: projecte complet iOS KMP, inclou app Android de referència empaquetada, no modificada.
+COMPROVACIONS/PAS_12_PER_A_TU_PARITAT_SERVIDOR.md: documentació, verificacions, advertiments de paritat.
+Aquest ZIP no certifica compilació en iPhone ni prova de sincronització real entre dispositius.
+Android v336 i servidor PHP/SQL originals no han sigut modificats.
+Propera entrega del projecte, passos 1–15, després del pas 15.

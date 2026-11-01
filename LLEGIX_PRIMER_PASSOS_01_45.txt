@@ -1,0 +1,16 @@
+L'AGENDA iOS v349 — ZIP 15/16 — PASSOS 01 A 45
+
+Projecte: ANDROID_STUDIO/
+Base de treball: la còpia acumulativa v349, passos 1–44.
+Últim pas incorporat: 45. Botiga d'artistes, productes, compres i gestió de comandes.
+
+Document de comprovació: ANDROID_STUDIO/COMPROVACIONS/PAS_45_BOTIGA_ARTISTES_PRODUCTES_COMPRES_COMANDES.md
+Proves: ANDROID_STUDIO/COMPROVACIONS/provar_pas_45.kt; comprovar_pas_45.py
+
+IMPORTANT:
+- Implementat en codi; encara no compilat en Xcode ni provat en un iPhone.
+- No s'han comprovat compres Stripe ni PHP/MariaDB en viu.
+- La recuperació d'una compra pendent després de tancar completament l'app no està resolta amb el contracte públic actual de la referència Android.
+- Android v336 i tots els originals de servidor continuen intactes.
+- Dades d'usuari persistents: servidor, mai noves preferències locals.
+- Següents passos: 46 donacions/serveis especials; 47 superadmin/permisos; 48 auditoria i paritat. Pròxim ZIP després del 48.

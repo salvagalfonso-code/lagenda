@@ -1,0 +1,40 @@
+﻿Apartat,Estat v342,Falta per a paritat / prova
+Compilació iOS,PENDENT DE MAC,Gradle Kotlin/Native + Swift tipat + enllaç framework + simulador + iPhone real
+Compilació Android,PENDENT DE PROVA,L’app original no s’ha canviat en v342; prova Android Studio
+Projecte KMP,ESTRUCTURA,Android original i mòduls shared/iosApp; falta prova real de conjunt
+Contractes servidor,PARCIAL,Els endpoints consultats existixen; no s’han provat amb producció
+Sense filtre,PARCIAL,API i caché; completar totes les fitxes i jornades i acceleració iOS
+Per a tu,PARCIAL,"Cal paritat de radis i comarques, exclusions, preferències, jerarquia d’afinitats i descobriment"
+Caché Per a tu,PARCIAL,Snapshot local 30 min; falta comparació byte per byte de resultat amb Android
+Refresc manual,PARCIAL,Botó d’actualitzar; falta gest estirar avall en iOS
+Publicitat HEADER,PARCIAL,Prioritat recuperada; falta disseny i ubicació exacta
+Publicitat Premium i normal,PARCIAL,Mètadades; falta paritat de visualització/rotació de posicions
+Entrades internes prioritàries,PARCIAL,"Detecta flag en esdeveniments, falta comprovació de tots els casos"
+Batecs seguits,AMPLIAT V342,"Filtratge d’artistes seguits, sis mínims, desduplicació"
+Batecs vistos,AMPLIAT V342,"GET/POST batecs/seen.php, estil gris local; falta test real iOS"
+Batecs navegació,PENDENT,"Passar batecs, arrossegament i retorn a inici amb popup de batec"
+Cerca,PARCIAL,"Cerca bàsica i festivals; falten On?, pobles, comarques, radis, filtres totals"
+Popup esdeveniment,PARCIAL,Quatre apartats; falten detalls complets i totes les accions
+Popup festival,PARCIAL,"Horaris bàsics; falten dies, entrades, ubicacions i guardat per actuació"
+Popup artista,PARCIAL,"Seguiment i concerts; falta imatge, disciplina, plataformes, productes, campaneta completa"
+Guardats,PARCIAL,"IDs guardats; falten llistes amb nom, compartir, llista general, caducitat"
+Recordatoris,PARCIAL,Data/hora; falta confirmació asíncrona real del planificador i sincronització multi-dispositiu
+Entrades gratuïtes,CONNECTAT / SENSE PROVA,"API de compra gratuïta; verificar drets, stock i emissió real"
+Entrades pagament,PENDENT,"Stripe/Redsys amb verificació servidor, TPV, devolucions, casos d’error"
+Entrades QR,PARCIAL,Generació de QR d’entrades emeses; falta dispositiu real
+Validació professional,PARCIAL,Lector càmera i check outcome VALIDATED; falta permisos/fallades/escaneig real
+Comunitat,PARCIAL,"Taulons, missatges, aprovacions, denúncies; falten taulons complets, moderació i bloquejos"
+Notificacions internes,PARCIAL,Bústia general; backend no dona les sis categories separades
+Push iOS APNs,PENDENT,"Entitlements, token del dispositiu, servidor APNs, entorn producció"
+Campanetes artistes,PENDENT,Freqüència personalitzada per artista i vinculació push
+Perfil,PARCIAL,"Login, registre, reset, Keychain; falta foto i edició completa"
+Preferències local,AMPLIAT V342,Separació per compte; Android té personalització més àmplia
+Eliminació de compte,PENDENT,API autoconsum i flux irreversible validat abans d’App Store
+Sign in with Apple / Google,PENDENT,"Client, servidor, flux autenticació i proteccions de seguretat"
+AgendaPRO,PARCIAL,"Validació manual; falta gestió global, creació, informes, tickets, vendes"
+Superadministrador,PARCIAL,Avisos interns; falta APNs i accés complet als controls
+Web i Redsys,PENDENT DE CONTRACTE I API,Acord de TPV multicanal i pagament segur
+App Store compliment,PENDENT,"Dades privacitat, proteccions UGC, denúncies/bloquejos, polítiques Apple"
+Accessibilitat,PENDENT,"VoiceOver, Dynamic Type, contrast, focus i controls"
+TestFlight,PENDENT,"Firma, compte developer, builds i beta en dispositius"
+Observabilitat,PENDENT,"Logs redacted, mètriques de startup/caché/errors i regressions"

@@ -1,0 +1,6 @@
+L'AGENDA iOS v349 — ZIP acumulatiu passos 1 a 24.
+Android v336 i servidor: fitxers sense canvis.
+Pas 24: filtres complets Android, crear/recuperar/eliminar al servidor amb convidats i registrats; diàleg Aplicar/Guardar.
+Estat i comprovacions: ESTAT_TREBALL_PASSOS.md i ANDROID_STUDIO/COMPROVACIONS/PAS_24_FILTRES_AVANCATS_CERQUES_GUARDADES.md.
+Pas 25 següent. ZIP següent al pas 27.
+Advertiment: NO s'ha compilat ni provat en iPhone real ni contra MariaDB.

@@ -1,0 +1,22 @@
+Funcionalitat,Estat v341,Verificació/Pendent
+Android original,Conservat,Cap fitxer de font Android app/src modificat respecte v340
+Xcode i KMP,Preparat no compilat,Preflight estàtic correcte; cal macOS amb Xcode
+Catàleg i Sense filtre,Implementació parcial,API i caché existent; manca paritat UI i filtres complets
+Per a tu,Implementació parcial,Regles ampliades per artistes de festivals categories organitzadors espais; manca algorisme Android exacte
+Caché 30 minuts,Implementada,Test local Kotlin sobre selector; sense prova real iOS
+Cerca de festivals,Corregida,Inclou artistes només en l'horari
+Publicitat i entrades internes,Parcial,Prioritat dels esdeveniments comercials; falta disposició publicitària exacta
+Batecs,Parcial,Falta paritat completa amb Android
+Guardats i recordatoris,Parcial,Guardats per compte; notificacions locals amb confirmació asíncrona no certificada
+Comptes,Ampliat,Login registre recuperació de contrasenya i Keychain
+Entrades gratuïtes,Integrades amb API,Cal prova real contra backend
+Entrades de pagament,Pendent,Flux Stripe/Redsys i confirmació segura de transaccions
+QR d'entrades,Ampliat,Visualització i escaneig AVFoundation; falta prova en iPhone real
+Validador PRO,Ampliat,Resultat VALIDATED comprovat; NO validada per NOT_FOUND/USED/CANCELLED
+Comunitat,Ampliat,Creació missatges denúncia i aprovació de sol·licituds; falten funcions avançades
+Notificacions locals,Parcial,Sol·licitud en primer inici i en recordatoris; falta confirmació asíncrona de programació
+Push Apple APNs,Pendent,Token servidor certificat Apple distribució de campanyes
+Perfil,Parcial,Falten edició de foto dades i eliminació de compte
+Autenticació externa,Pendent,Inici Google/Apple no migrat
+L'AgendaPRO i superadmin,Parcial,Validació i avisos interns; falta paritat
+Publicació App Store,Pendent,Compilació Xcode permisos firma privacitat moderació TestFlight

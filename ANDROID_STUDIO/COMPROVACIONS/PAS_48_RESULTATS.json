@@ -1,0 +1,59 @@
+{
+  "pass": 48,
+  "kind": "static_and_isolated_policy_checks",
+  "base_zips": [
+    {
+      "zip": "LAGENDA_IOS_V349_PASSOS_01_AL_36_ACUMULATIU(1).zip",
+      "files_present": 439,
+      "files_modified": 13,
+      "no_android_server_changes": true
+    },
+    {
+      "zip": "LAGENDA_IOS_V349_PASSOS_01_AL_39_ACUMULATIU_ZIP_13_DE_16.zip",
+      "files_present": 452,
+      "files_modified": 8,
+      "no_android_server_changes": true
+    },
+    {
+      "zip": "LAGENDA_IOS_V349_PASSOS_01_AL_42_ACUMULATIU_ZIP_14_DE_16.zip",
+      "files_present": 465,
+      "files_modified": 8,
+      "no_android_server_changes": true
+    },
+    {
+      "zip": "LAGENDA_IOS_V349_PASSOS_01_AL_45_ACUMULATIU_ZIP_15_DE_16.zip",
+      "files_present": 481,
+      "files_modified": 7,
+      "no_android_server_changes": true
+    }
+  ],
+  "warnings": [
+    "No hi ha compilació Kotlin/Native ni Xcode/iPhone; Gradle requereix descàrrega externa inaccessible.",
+    "Cap endpoint PHP/MariaDB ni Stripe/APNs s’ha provat en producció.",
+    "Els horaris guardats de festival d’Android v336 romanen en SharedPreferences: paritat servidor no acreditada.",
+    "Recuperació de PaymentIntent després de tancament total pendent de contracte backend.",
+    "Canvi de rols superadmin necessita migració i endpoint PHP auxiliars no desplegats.",
+    "Estat publicitari de popup diari encara en cache de dispositiu; requereix decisió de backend.",
+    "La barrera de Batecs en codi és 7 seguits, no 6; discrepància amb especificació.",
+    "Visual i rendiment no han pogut ser verificats executant iOS."
+  ],
+  "changed_since_zip15": [
+    "ANDROID_STUDIO/iosApp/AgendaIOS/AgendaKeychain.swift",
+    "ANDROID_STUDIO/shared/src/commonMain/kotlin/com/example/agendavalenciana/ios/AgendaIosScreen.kt",
+    "ANDROID_STUDIO/shared/src/commonMain/kotlin/com/example/agendavalenciana/ios/IosAgendaApi.kt",
+    "ANDROID_STUDIO/shared/src/commonMain/kotlin/com/example/agendavalenciana/ios/IosPublisherPanel.kt",
+    "ANDROID_STUDIO/shared/src/commonMain/kotlin/com/example/agendavalenciana/ios/IosPublisherRoles.kt",
+    "ANDROID_STUDIO/shared/src/commonMain/kotlin/com/example/agendavalenciana/ios/IosSuperAdminConsole.kt",
+    "ESTAT_TREBALL_PASSOS.md"
+  ],
+  "source_zip15_entries": 481,
+  "wiring": {
+    "ios_modules": 14,
+    "api_routes_checked": 24,
+    "native_bridge_methods": 30,
+    "reported_guest_id_now_server_issued": true,
+    "ios_local_ad_popup_state_still_present": true
+  },
+  "swift_parse": "PASS (syntax only)",
+  "aux_admin_php_lint": "PASS (not deployed)"
+}

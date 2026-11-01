@@ -1,0 +1,40 @@
+workflows:
+  ios_simulator:
+    name: LAgenda iOS Simulator (ARM64)
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      vars:
+        JAVA_TOOL_OPTIONS: "-Xmx4g"
+    scripts:
+      - name: Compilar iOS Simulator amb Xcode
+        script: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          mkdir -p "$CM_BUILD_DIR/artifacts"
+          if [ -d "$CM_BUILD_DIR/ANDROID_STUDIO/iosApp/AgendaIOS.xcodeproj" ]; then
+            cd "$CM_BUILD_DIR/ANDROID_STUDIO"
+          else
+            cd "$CM_BUILD_DIR"
+          fi
+          test -d iosApp/AgendaIOS.xcodeproj
+          test -f shared/build.gradle.kts
+          test -f gradlew
+          xcodebuild build \
+            -project iosApp/AgendaIOS.xcodeproj \
+            -scheme AgendaIOS \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$CM_BUILD_DIR/DerivedData" \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee "$CM_BUILD_DIR/artifacts/xcodebuild.log"
+          APP="$CM_BUILD_DIR/DerivedData/Build/Products/Debug-iphonesimulator/AgendaIOS.app"
+          test -d "$APP"
+          cd "$(dirname "$APP")"
+          ditto -c -k --keepParent AgendaIOS.app "$CM_BUILD_DIR/artifacts/lagenda-ios-simulator.zip"
+    artifacts:
+      - artifacts/*.zip
+      - artifacts/*.log

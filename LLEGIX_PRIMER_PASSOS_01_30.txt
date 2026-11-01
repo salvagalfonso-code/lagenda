@@ -1,0 +1,8 @@
+L'AGENDA · iOS v349 · CÒPIA ACUMULATIVA PASSOS 1–30 DE 48
+
+1) Obrir ANDROID_STUDIO/ com a projecte de treball (iOS + mòdul Android original intacte).
+2) Android v336 és la referència congelada; no està modificat.
+3) Pas 30: APNs, permisos, token al Keychain, convidats, notificacions d'esdeveniments/artistes i hores de descans. Consulta ANDROID_STUDIO/COMPROVACIONS/PAS_30_APNS_ENVIAMENTS.md.
+4) IMPORTANT: SERVIDOR_APNS_PAS30/ conté un **paquet de desplegament de servidor additiu**; no està aplicat a quimerafest.com ni a MariaDB. SERVIDOR_APNS/ original continua intacte. Necessita SQL, credencials d'Apple i cron.
+5) Les proves locals han passat, però NI l'app iOS ha estat compilada en iPhone NI s'ha fet un enviament push real. Cal compilació signada i prova API/MariaDB/APNs en un entorn de test.
+6) ZIP acumulatiu 1–30. Pròxim ZIP en acabar el pas 33.

@@ -1,0 +1,58 @@
+package com.example.agendavalenciana.ios
+
+// Self-contained JVM harness executes the EXACT production policy with lightweight API models.
+data class IosCommunityUser(val id: Int,val name: String)
+data class IosCommunityMember(val id:Int,val name:String,val role:String,val status:String)
+data class IosCommunityManagement(val members:List<IosCommunityMember>,val bans:List<IosCommunityUser>)
+data class IosCommunityReport(val id:Int,val groupId:Int,val messageId:Int,val reportedUserId:Int,
+    val groupTitle:String,val reportedName:String,val reason:String,val messageText:String,val status:String)
+fun main() {
+    val p=IosCommunityModerationPolicy
+    var checks=0
+    fun expect(b:Boolean) {check(b){"PAS33 check ${checks+1} failed"};checks++}
+    expect(p.validReport(44,0,"Denúncia del tauló"))
+    expect(p.validReport(44,8,"Contingut ofensiu"))
+    expect(!p.validReport(0,8,"motiu"))
+    expect(!p.validReport(5,-2,"motiu"))
+    expect(!p.validReport(5,1,"   "))
+    expect(!p.validReport(5,1,"z".repeat(501)))
+    expect(p.validBlock(3,4))
+    expect(!p.validBlock(3,3))
+    expect(!p.validBlock(0,3))
+    expect(p.verifiedBlock(true,true))
+    expect(p.verifiedBlock(false,false))
+    expect(!p.verifiedBlock(true,false))
+    expect(p.validManagement(3,"DELETE_MESSAGE",0,9,1))
+    expect(!p.validManagement(3,"DELETE_MESSAGE",3,9,1))
+    expect(!p.validManagement(3,"DELETE_MESSAGE",0,0,1))
+    expect(p.validManagement(3,"BAN_MEMBER",4,0,1))
+    expect(!p.validManagement(3,"BAN_MEMBER",1,0,1))
+    expect(!p.validManagement(3,"UNBAN_MEMBER",4,9,1))
+    expect(!p.validManagement(3,"FAKE_ACTION",4,0,1))
+    val before=IosCommunityManagement(listOf(IosCommunityMember(1,"owner","CREATOR","ACCEPTED"),
+        IosCommunityMember(4,"member","MEMBER","ACCEPTED")),emptyList())
+    expect(p.eligibleManagement(before,"BAN_MEMBER",4))
+    expect(!p.eligibleManagement(before,"BAN_MEMBER",1))
+    expect(!p.eligibleManagement(before,"UNBAN_MEMBER",4))
+    val after=before.copy(bans=listOf(IosCommunityUser(4,"member")))
+    expect(p.eligibleManagement(after,"UNBAN_MEMBER",4))
+    expect(p.verifiedBan(setOf(4),4,"BAN_MEMBER"))
+    expect(p.verifiedBan(emptySet(),4,"UNBAN_MEMBER"))
+    expect(!p.verifiedBan(emptySet(),4,"BAN_MEMBER"))
+    expect(p.validAdminAction("CLOSE_GROUP"))
+    expect(!p.validAdminAction("DELETE_ACCOUNT"))
+    expect(p.adminStatus("DISMISS")=="DISMISSED")
+    expect(p.adminStatus("REVIEW")=="REVIEWED")
+    expect(p.adminStatus("BAN_MEMBER")=="ACTIONED")
+    val report=IosCommunityReport(10,20,0,0,"board","","reason","","OPEN")
+    expect(p.eligibleAdmin(report,"DISMISS"))
+    expect(p.eligibleAdmin(report,"CLOSE_GROUP"))
+    expect(!p.eligibleAdmin(report,"DELETE_MESSAGE"))
+    expect(!p.eligibleAdmin(report,"BAN_MEMBER"))
+    val report2=report.copy(messageId=8,reportedUserId=4)
+    expect(p.eligibleAdmin(report2,"DELETE_MESSAGE"))
+    expect(p.eligibleAdmin(report2,"BAN_MEMBER"))
+    expect(p.verifiedReportStatus(listOf(report2.copy(status="ACTIONED")),10,"ACTIONED"))
+    expect(!p.verifiedReportStatus(listOf(report2.copy(status="OPEN")),10,"ACTIONED"))
+    println("PAS33_KOTLIN_JVM_PASS: $checks cases")
+}

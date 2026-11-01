@@ -1,0 +1,8 @@
+L'AGENDA iOS v349 · Lliurament 06 acumulatiu · passos 1–18
+
+ANDROID_STUDIO/ és el projecte iOS KMP complet amb la còpia Android intacta.
+COMPROVACIONS/PAS_18_HORARIS_FESTIVALS_GUARDATS.md explica canvis, proves i limitacions.
+Els fitxers de referència Android v336 i servidor no s'han modificat.
+No hi ha compilació completa verificada en iPhone ni prova real PHP/MariaDB.
+ATENCIÓ: Android v336 encara guarda les actuacions individuals de festivals en SharedPreferences locals, no al servidor. L'escriptura iOS sí que és remota; la paritat real d'eixes seleccions no està garantida mentre Android quede congelat.
+Pròxim ZIP en acabar el pas 21.

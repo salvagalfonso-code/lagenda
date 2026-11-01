@@ -1,0 +1,19 @@
+L'AGENDA — iOS v349, PRIMER LLIURAMENT ACUMULATIU (passos 1, 2 i 3)
+
+Obri: ANDROID_STUDIO/iosApp/AgendaIOS.xcodeproj
+Fitxers del projecte KMP: ANDROID_STUDIO/shared/
+
+PAS 1: connexions HTTP centralitzades i compatibilitat de transport amb Android v336.
+PAS 2: identitat convidada del servidor al Keychain d'iOS, creada i recuperada automàticament.
+PAS 3: fusió del convidat amb un compte existent amb guest/claim.php; registre nou amb guest_token i conversió en el mateix users.id. Reintents sense perdre credencials.
+
+Informe tècnic: ANDROID_STUDIO/COMPROVACIONS/PAS_03_FUSIO_CONVIDAT.md
+Comprovacions: ANDROID_STUDIO/COMPROVACIONS/comprovar_pas_01.py, comprovar_pas_02.py, comprovar_pas_03.py
+
+ANDROID V336 NO MODIFICAT. SERVIDOR NO MODIFICAT. NO S'HA DESPLEGAT RES.
+
+Comprovat: codi, contracte, sintaxi Swift, simulació parcial de fusió amb dos fitxers Kotlin reals i dades JSON simulades.
+Pendent: compilació real a Xcode/Codemagic, proves en iPhone i proves de fusió en MariaDB. El codi de registre PHP pot sobreescriure algunes preferències de notificacions de convidats: cal verificar i corregir abans de certificar conservació total.
+
+El ZIP és complet, acumulatiu i inclou la mateixa estructura que la v349 original.
+El pas 4 NO està inclòs.

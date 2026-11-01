@@ -1,0 +1,21 @@
+L'AGENDA iOS v349 | LLIURAMENT 12 | PASSOS 01–36
+
+Conté el projecte ANDROID_STUDIO complet amb el codi iOS acumulat; l'Android incrustat (app/) és només referència i no s'ha modificat.
+També inclou els paquets complementaris del servidor de passos previs, sense certificar desplegament.
+
+NOVETATS PAS 36
+- Menú + per a convidats, usuaris, professionals i SUPER_ADMIN, amb permisos confirmats pel servidor.
+- Publicar i editar activitats pròpies utilitzant les API d'Android v336.
+- Reclamar perfils professionals; consulta de confiança i autoria real.
+- Iniciar facturació amb formulari legal i confirmació de servidor. No activa cobraments sense modalitats i TPV.
+- Revisions de publicacions i reclamacions per superadministració.
+- Opcions de crear anunci, merch i donacions visibles però encara no integrades de punta a punta.
+
+PROVES I LIMITACIONS
+- 36 scripts de regressió i 36 asserts Kotlin/JVM pas 36 PASS.
+- Sintaxi Swift PASS i Android original byte a byte intacte.
+- No s'ha aconseguit compilar tot Kotlin Multiplatform/Xcode; no s'ha provat en iPhone ni amb MariaDB en viu.
+- Proves reals de l'editor de publicació, alta fiscal, campanyes i pagaments pendents.
+- Cal verificar les API i taules SQL desplegades a producció.
+
+Consulta ANDROID_STUDIO/COMPROVACIONS/PAS_36_ROLS_MENU_PROFESSIONAL.md i ESTAT_TREBALL_PASSOS.md.

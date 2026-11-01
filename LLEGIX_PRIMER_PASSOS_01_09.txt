@@ -1,0 +1,7 @@
+L'AGENDA — iOS v349, acumulatiu passos 1–9
+
+- ANDROID_STUDIO/: projecte iOS KMP íntegre (inclou app Android de referència embeguda, intacta).
+- SERVIDOR_*: materials que ja existien en v349, no implantats ni modificats.
+- COMPROVACIONS/PAS_09_...md: abast, limitacions i proves.
+- Android v336 extern NO s'ha modificat; este ZIP no és una nova versió d'Android.
+- Compilació iOS, traducció integral de UI i tests en MariaDB encara pendents.

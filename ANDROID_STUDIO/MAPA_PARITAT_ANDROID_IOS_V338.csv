@@ -1,0 +1,15 @@
+Apartat,Android v336,iOS v338,Estat
+Inici i sense filtre,Complet,Catàleg i cerca del servidor,Parcial
+Per a tu,Personalització completa,Seguits + categories locals + prioritat comercial i caché 30 min,Parcial
+Batecs,Complets,Carrusel limitat a seguit >=6,Parcial
+Festivals,Horaris complets,Horaris i focus d'artista,Parcial
+Popup artista,Complet,Seguir + concerts,Parcial
+Guardats i recordatoris,Complet,Sincronitzats amb servidor i local iOS,Parcial
+Entrades,Compra i QR,Consulta de tiquets; no compra ni QR natiu,Pendent parcial
+Comunitat,Xats i taulons,Grups i missatges bàsics,Parcial
+Notificacions,Bústia interna i opcions,General + categories visuals; recordatoris locals,Parcial
+Push Android/Apple,Android en progrés,APNs backend pendent,Pendent
+Perfil,Complet,Login Keychain i informació bàsica,Parcial
+Superadmin,Campanyes internes,Previsualització i enviament intern,Parcial
+Google i Apple OAuth,Google Android,Pendent iOS,Pendent
+Publicació App Store,No aplica,Xcode sense compilació/TestFlight,Pendent

@@ -1,0 +1,20 @@
+L’AGENDA iOS v349 — ZIP 16/16 — PASSOS 01–48 (acumulatiu)
+
+ESTAT: codi acumulat; auditoria estàtica del pas 48 finalitzada. NO s'ha compilat ni validat
+el projecte complet en iPhone/Xcode, ni s'han executat proves reals contra PHP/MariaDB,
+Stripe o APNs. No és una certificació de paritat visual ni una versió per producció.
+
+OBRIR: ANDROID_STUDIO/iosApp/AgendaIOS.xcodeproj (esquema AgendaIOS)
+REFERÈNCIA: ANDROID_STUDIO/app/ = Android original v336, sense canvis.
+SERVIDOR: materials auxiliars inclosos, NO desplegats.
+
+AUDITORIA: ANDROID_STUDIO/COMPROVACIONS/PAS_48_AUDITORIA_FINAL.md
+RESULTATS: ANDROID_STUDIO/COMPROVACIONS/PAS_48_RESULTATS.json
+TEST: ANDROID_STUDIO/COMPROVACIONS/comprovar_pas_48.py
+
+Correcció pas48: les denúncies d'esdeveniments en iOS reutilitzen el guest_id
+emés pel servidor; s'ha retirat un identificador de denúncia persistent propi del mòbil.
+
+BLOQUEJOS: compilació real, paritat visual/rendiment i sincronització entre
+Android v336 i iOS, recuperació de pagaments pendents, migracions i PHP auxiliars,
+clau de popup publicitari encara local i llindar de Batecs de 7 vs preferència de 6.

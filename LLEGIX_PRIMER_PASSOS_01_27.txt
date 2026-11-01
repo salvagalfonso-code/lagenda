@@ -1,0 +1,1 @@
+L’AGENDA iOS v349 — Projecte acumulatiu passos 1–27 de 48. Android v336 immutable. PAS 27: fitxa d’artista real (foto, disciplina, seguiment, campaneta, concerts, productes). Llegiu ANDROID_STUDIO/COMPROVACIONS/PAS_27_POPUP_ARTISTA.md. Cap compilació Xcode/KMP ni prova en iPhone real certificades. Següent pas 28.

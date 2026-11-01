@@ -1,0 +1,11 @@
+L'AGENDA iOS v349 — ZIP acumulatiu de passos 01–06
+
+Projecte: ANDROID_STUDIO/ i iosApp/ dins; Android v336 s'utilitza com a referència IMMUTABLE.
+Este ZIP incorpora pas 1 connexions API; pas 2 convidat; pas 3 fusió; pas 4 lectura estat;
+pas 5 escriptures al servidor; pas 6 cua xifrada per a escriptures personals suportades.
+
+Consulta ANDROID_STUDIO/COMPROVACIONS/PAS_06_CUA_OFFLINE_XIFRADA.md per a cobertura exacta,
+proves, limitacions i instruccions de revisió.
+
+No ha sigut compilat amb Xcode ni comprovat en un iPhone. Les verificacions estàtiques i
+JVM amb simulació de dependències no acrediten sincronització real al servidor.

@@ -1,0 +1,62 @@
+package com.example.agendavalenciana.ios
+
+import platform.Foundation.NSDate
+import platform.Foundation.NSDateFormatter
+import platform.Foundation.NSTimeZone
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+
+// Clock és multiplataforma i evita l'accés Objective-C que falla en Kotlin/Native 2.4.
+actual fun currentEpochMillis(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
+// NSDateFormatter usa la zona horària local del dispositiu per defecte.
+// Evita constructors Objective-C NSTimeZone no disponibles en Kotlin/Native.
+actual fun currentLocalDateIso(): String = NSDateFormatter().apply {
+    dateFormat = "yyyy-MM-dd"
+}.stringFromDate(NSDate())
+
+actual fun currentAgendaDateIso(): String {
+    val madrid = NSTimeZone.timeZoneWithName("Europe/Madrid")
+    val localDate = NSDate()
+    val hour = NSDateFormatter().apply {
+        timeZone = madrid
+        dateFormat = "HH"
+    }.stringFromDate(localDate).toIntOrNull() ?: 12
+    // Only the calendar day is needed. Moving back 24h in absolute time reliably
+    // reaches yesterday before 05:00, including European DST transitions.
+    val culturalDate = if (hour < 5) NSDate.dateWithTimeIntervalSince1970(
+        localDate.timeIntervalSince1970 - 86_400.0) else localDate
+    return NSDateFormatter().apply {
+        timeZone = madrid
+        dateFormat = "yyyy-MM-dd"
+    }.stringFromDate(culturalDate)
+}
+
+actual fun platformReadPublicCache(key: String): String =
+    IosNativeBridge.current?.readCache(key).orEmpty()
+actual fun platformWritePublicCache(key: String, value: String) {
+    IosNativeBridge.current?.writeCache(key, value)
+}
+actual fun platformOpenExternal(url: String) {
+    if (!url.startsWith("https://")) return
+    platform.Foundation.NSURL.URLWithString(url)?.let { uri ->
+        platform.UIKit.UIApplication.sharedApplication.openURL(uri)
+    }
+}
+
+actual suspend fun platformScheduleReminder(userId: Int, eventId: Int, title: String, isoDate: String): Boolean =
+    suspendCancellableCoroutine { cont ->
+        val bridge = IosNativeBridge.current
+        if (bridge == null) {
+            cont.resume(false)
+        } else {
+            bridge.scheduleLocalReminderConfirmed(userId, eventId, title, isoDate,
+                object : IosReminderSchedulingCallback {
+                    override fun onResult(success: Boolean, message: String) {
+                        if (cont.isActive) cont.resume(success)
+                    }
+                })
+        }
+    }
+actual fun platformCancelReminder(userId: Int, eventId: Int) {
+    IosNativeBridge.current?.cancelLocalReminder(userId, eventId)
+}

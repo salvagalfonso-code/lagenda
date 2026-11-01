@@ -1,0 +1,14 @@
+L'AGENDA iOS v349 — LLiurament acumulatiu passos 01–33
+
+ANDROID_STUDIO/   Codi complet de treball amb els 33 passos acumulats.
+ANDROID_STUDIO/COMPROVACIONS/PAS_33_COMUNITAT_BLOQUEJOS_MODERACIO.md  Informe de l'últim pas.
+SERVIDOR_COMUNITAT/   Ampliacions de PHP i SQL de Comunitat separades, no desplegades.
+SERVIDOR_APNS_PAS30/   Ampliacions APNs separades, no desplegades.
+ESTAT_TREBALL_PASSOS.md    Seguiment de l'auditoria acumulativa.
+
+Android v336 i la seua còpia dins d'ANDROID_STUDIO/app NO s'han modificat.
+No és una app iPhone compilada, ni els canvis nous s'han provat contra MariaDB.
+No desplegues migracions o endpoints sense còpia de seguretat i revisió.
+
+Següent pas acordat: 34/48 — Perfil: dades, fotografia, configuració.
+Pròxim ZIP després del pas 36.

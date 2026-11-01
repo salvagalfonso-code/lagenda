@@ -1,0 +1,18 @@
+Secció,Estat v340,Observacions
+Inici / Sense filtre,Parcial,Catàleg real i cache persistent 30 minuts; UI distinta d'Android
+Per a tu,Parcial,Afinitat simplificada; conserva prioritat comercial
+Publicitat,Parcial,Mostra fitxes i etiquetes però no totes les posicions comercials exactes
+Batecs,Parcial,Seguiment bàsic i miniatures enriquides
+Cercador,Parcial,Títols artistes pobles categories; falten filtres avançats
+Festivals,Parcial,Horaris i coincidència d'artista; no paritat visual total
+Popup artista,Parcial,Seguiments i concerts
+Guardats i recordatoris,Parcial,Recordatoris locals i compte; manca confirmació asíncrona
+Entrades pròpies,Ampliat,Consulta opcions reserva gratuïta i QR emés per servidor
+Entrades de pagament,Pendent,SDK Stripe/Redsys i confirmació servidor
+Validador PRO,Parcial,Validació manual via API; falta càmera
+Comunitat,Ampliat,Llegir enviar crear denunciar; falten bloquejos i modalitats avançades
+Notificacions internes,Parcial,Safata i alguns deep links; categories no servides pel backend
+Push APNs,Pendent,Cal tokens de dispositiu i servidor
+Perfil,Parcial,Login password Keychain tancament de sessió
+Superadmin,Parcial,Campanyes internes sense push
+Publicació App Store,Pendent,Cal compilar provar TestFlight i compliment
